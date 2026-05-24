@@ -1,13 +1,18 @@
 import json
 import logging
 import sys
+from multiprocessing import Pipe, Process
+
 import boto3
+import info
 import utils
 from botocore.config import Config
-from langchain_aws import BedrockEmbeddings
+from langchain_aws import BedrockEmbeddings, ChatBedrock
 from langchain_community.vectorstores.opensearch_vector_search import OpenSearchVectorSearch
 from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
 from opensearchpy import OpenSearch, RequestsHttpConnection
+from pydantic.v1 import BaseModel, Field
 from requests_aws4auth import AWS4Auth
 
 logging.basicConfig(
@@ -27,9 +32,13 @@ projectName = config.get("projectName", "langgraph-nova")
 region = config.get("region", "us-west-2")
 
 enableHybridSearch = "Enable"
+enableGrading = "Enable"
+multi_region = "Disable"
+grading_model_name = "Claude 4.5 Sonnet"
 
 index_name = projectName
 number_of_results = 5
+selected_chat = 0
 
 session = boto3.Session(region_name=region)
 credentials = session.get_credentials()
@@ -289,11 +298,169 @@ def retrieve_documents_from_opensearch(query, top_k):
     return relevant_docs
 
 
+class GradeDocuments(BaseModel):
+    """Binary score for relevance check on retrieved documents."""
+
+    binary_score: str = Field(
+        description="Documents are relevant to the question, 'yes' or 'no'"
+    )
+
+
+def _get_grading_chat(models, selected):
+    profile = models[selected]
+    bedrock_region = profile["bedrock_region"]
+    model_id = profile["model_id"]
+    model_type = profile["model_type"]
+    max_output_tokens = 4096
+    logger.info(
+        "grading LLM: selected=%s, region=%s, model_id=%s, model_type=%s",
+        selected,
+        bedrock_region,
+        model_id,
+        model_type,
+    )
+
+    if model_type == "nova":
+        stop_sequence = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
+    elif model_type == "claude":
+        stop_sequence = "\n\nHuman:"
+    else:
+        stop_sequence = "\n\nHuman:"
+
+    boto3_bedrock = boto3.client(
+        service_name="bedrock-runtime",
+        region_name=bedrock_region,
+        config=Config(retries={"max_attempts": 30}),
+    )
+    # Claude 4.x: temperature and top_p cannot both be set (use chat.py style).
+    if model_type == "openai":
+        parameters = {
+            "max_tokens": max_output_tokens,
+            "temperature": 0.1,
+        }
+    elif model_type == "nova":
+        parameters = {
+            "max_tokens": max_output_tokens,
+            "temperature": 0.1,
+            "top_k": 250,
+            "top_p": 0.9,
+            "stop_sequences": [stop_sequence],
+        }
+    else:
+        parameters = {
+            "max_tokens": max_output_tokens,
+            "stop_sequences": [stop_sequence],
+        }
+    return ChatBedrock(
+        model_id=model_id,
+        client=boto3_bedrock,
+        model_kwargs=parameters,
+        region_name=bedrock_region,
+    )
+
+
+def get_retrieval_grader(chat):
+    system = (
+        "You are a grader assessing relevance of a retrieved document to a user question."
+        "If the document contains keyword(s) or semantic meaning related to the question, grade it as relevant."
+        "Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."
+    )
+    grade_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system),
+            ("human", "Retrieved document: \n\n {document} \n\n User question: {question}"),
+        ]
+    )
+    structured_llm_grader = chat.with_structured_output(GradeDocuments)
+    return grade_prompt | structured_llm_grader
+
+
+def _grade_document_based_on_relevance(conn, question, doc, models, selected):
+    chat = _get_grading_chat(models, selected)
+    retrieval_grader = get_retrieval_grader(chat)
+    score = retrieval_grader.invoke(
+        {"question": question, "document": doc.page_content}
+    )
+    if score.binary_score.lower() == "yes":
+        logger.info("---GRADE: DOCUMENT RELEVANT---")
+        conn.send(doc)
+    else:
+        logger.info("---GRADE: DOCUMENT NOT RELEVANT---")
+        conn.send(None)
+    conn.close()
+
+
+def _grade_documents_using_parallel_processing(models, question, documents):
+    global selected_chat
+
+    number_of_models = len(models)
+    filtered_docs = []
+    processes = []
+    parent_connections = []
+
+    for doc in documents:
+        parent_conn, child_conn = Pipe()
+        parent_connections.append(parent_conn)
+        process = Process(
+            target=_grade_document_based_on_relevance,
+            args=(child_conn, question, doc, models, selected_chat),
+        )
+        processes.append(process)
+
+        selected_chat = selected_chat + 1
+        if selected_chat == number_of_models:
+            selected_chat = 0
+
+    for process in processes:
+        process.start()
+
+    for parent_conn in parent_connections:
+        relevant_doc = parent_conn.recv()
+        if relevant_doc is not None:
+            filtered_docs.append(relevant_doc)
+
+    for process in processes:
+        process.join()
+
+    return filtered_docs
+
+
+def grade_documents(question, documents):
+    """Filter retrieved documents by LLM relevance grading (see lambda_function.py)."""
+    logger.info("###### grade_documents ######")
+
+    if not documents:
+        return []
+
+    models = info.get_model_info(grading_model_name)
+    if multi_region == "Enable":
+        return _grade_documents_using_parallel_processing(models, question, documents)
+
+    llm = _get_grading_chat(models, 0)
+    retrieval_grader = get_retrieval_grader(llm)
+    filtered_docs = []
+    for doc in documents:
+        score = retrieval_grader.invoke(
+            {"question": question, "document": doc.page_content}
+        )
+        if score.binary_score.lower() == "yes":
+            logger.info("---GRADE: DOCUMENT RELEVANT---")
+            filtered_docs.append(doc)
+        else:
+            logger.info("---GRADE: DOCUMENT NOT RELEVANT---")
+    return filtered_docs
+
+
 def retrieve(query: str) -> str:
     """Query managed OpenSearch (vector + hybrid lexical) and return MCP JSON."""
     logger.info(f"retrieve --> query: {query}")
 
     relevant_docs = retrieve_documents_from_opensearch(query, number_of_results)
+
+    if enableGrading == "Enable":
+        logger.info("grading enabled for %s document(s)", len(relevant_docs))
+        relevant_docs = grade_documents(query, relevant_docs)
+        logger.info("%s document(s) after grading", len(relevant_docs))
 
     json_docs = []
     seen_contents = set()
