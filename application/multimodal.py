@@ -466,7 +466,6 @@ def pdf_to_images(file_url: str, dpi: Optional[int] = None) -> list[str]:
         if is_temp and os.path.isfile(pdf_path):
             os.remove(pdf_path)
 
-
 def img2text(images: list[str], filename: Optional[str] = None) -> list[str]:
     """Convert images to per-page markdown files (e.g. page_001.png → page_001.md).
 
