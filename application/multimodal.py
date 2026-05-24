@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 import json
 import sys
@@ -38,7 +39,7 @@ region = config.get("region", "us-west-2")
 sharing_url = (config.get("sharing_url") or "").rstrip("/")
 s3_prefix = "docs"
 markdown_s3_prefix = "markdown"
-contextual_embedding = "Disable"
+contextual_embedding = "Enable"
 meta_prefix = "metadata/"
 
 LLM_PROMPT = (
@@ -178,7 +179,7 @@ def get_contextual_docs_from_chunks(whole_doc, splitted_docs): # per chunk
     contexualized_chunks = []
     for i, doc in enumerate(splitted_docs):
         # chat = get_contexual_retrieval_chat()
-        llm = chat.get_model()
+        llm = chat.get_chat()
         
         contexual_chain = contextual_prompt | llm
             
@@ -313,12 +314,43 @@ def add_to_opensearch(body, name: str = "", url: str = ""):
         logger.info(f"parent contextual chunk[0]: {parent_docs[0].page_content}")
         logger.info(f"contexualized_chunks[0]: {contexualized_chunks[0]}")
     else:
-        parent_docs = splitted_docs  
+        parent_docs = splitted_docs
 
     if len(parent_docs):
+        lastest_page = 0
         for i, doc in enumerate(parent_docs):
+            text = doc.page_content
+
+            pages = []
+            open_tag = "<pages>"
+            close_tag = "</pages>"
+            start = 0
+            while True:
+                page_tag = text.find(open_tag, start)
+                if page_tag == -1:
+                    break
+                content_start = page_tag + len(open_tag)
+                end_tag = text.find(close_tag, content_start)
+                if end_tag == -1:
+                    break
+                page_num = text[content_start:end_tag].strip()
+                if page_num.isdigit():
+                    pages.append(int(page_num))
+                start = end_tag + len(close_tag)
+            logger.info(f"related pages: {pages}")
+            
+            if pages:
+                doc.metadata["pages"] = pages[0] # first page number
+                lastest_page = pages[-1]
+            else:
+                doc.metadata["pages"] = lastest_page
+                logger.info(f"lastest_page: {lastest_page}") # use latest page number if no pages tag
+
             doc.metadata["doc_level"] = "parent"
-            # logger.info(f"parent_docs[{i}]: {doc}")
+
+            # remove <pages> tags from content
+            parent_docs[i].page_content = re.sub(r'\n<pages>\d+</pages>\n', '', doc.page_content)
+
         logger.info(f"parent_docs[0]: {parent_docs[0].page_content}")
 
         try:
@@ -336,9 +368,12 @@ def add_to_opensearch(body, name: str = "", url: str = ""):
                 if contextual_embedding == 'Enable':
                     contexualized_child_docs = [] # contexualized child doc
                     for _doc in child_docs:
+                        # remove <pages> tags from content
+                        page_content = re.sub(r'\n<pages>\d+</pages>\n', '', _doc.page_content)
+                        
                         contexualized_child_docs.append(
                             Document(
-                                page_content=contexualized_chunks[i]+"\n\n"+_doc.page_content,
+                                page_content=contexualized_chunks[i]+"\n\n"+page_content   ,
                                 metadata=_doc.metadata
                             )
                         )
