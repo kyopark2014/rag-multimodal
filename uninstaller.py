@@ -52,6 +52,15 @@ def setup_logging():
 logger = setup_logging()
 
 
+def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
+    """Return True for yes; empty input uses default."""
+    hint = "Y/n" if default else "y/N"
+    response = input(f"{prompt} ({hint}): ").strip().lower()
+    if not response:
+        return default
+    return response in ("y", "yes")
+
+
 def _matches_cloudfront(dist: dict) -> bool:
     return cloudfront_comment in dist.get("Comment", "")
 
@@ -506,38 +515,78 @@ def main():
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="Skip confirmation prompt and proceed with deletion",
+        help="Skip the main confirmation prompt and proceed with deletion",
+    )
+    parser.add_argument(
+        "--delete-s3",
+        action="store_true",
+        help="Delete the S3 bucket without prompting (default: keep bucket)",
+    )
+    parser.add_argument(
+        "--delete-cloudfront",
+        action="store_true",
+        help="Delete CloudFront distribution and OAI without prompting (default: keep)",
     )
     args = parser.parse_args()
 
     if not args.yes:
         print("\n" + "=" * 60)
-        print("WARNING: This will delete all resources created by installer.py")
+        print("WARNING: This will delete AWS resources created by installer.py")
         print("=" * 60)
         print(f"  Project:     {project_name}")
         print(f"  Region:      {region}")
         print(f"  S3 bucket:   {bucket_name}")
+        print("")
+        print("  S3 and CloudFront are optional (you will be asked; default: keep).")
         print("=" * 60)
         response = input("\nAre you sure you want to continue? (yes/no): ")
         if response.lower() != "yes":
             print("Uninstallation cancelled.")
             sys.exit(0)
 
+    delete_s3 = args.delete_s3
+    delete_cloudfront = args.delete_cloudfront
+    if not delete_s3:
+        delete_s3 = _prompt_yes_no(
+            f"Delete S3 bucket '{bucket_name}' and all its objects?",
+            default=False,
+        )
+    if not delete_cloudfront:
+        delete_cloudfront = _prompt_yes_no(
+            "Delete CloudFront distribution and Origin Access Identity?",
+            default=False,
+        )
+
+    logger.info(f"Delete S3 bucket: {delete_s3}")
+    logger.info(f"Delete CloudFront: {delete_cloudfront}")
+
     start_time = time.time()
 
     try:
         # Reverse dependency order of installer.main()
-        disable_cloudfront_distributions()
+        if delete_cloudfront:
+            disable_cloudfront_distributions()
+        else:
+            logger.info("Skipping CloudFront disable (not requested)")
+
         delete_knowledge_bases()
         delete_opensearch_collection()
         delete_lambda_s3_event_manager()
         delete_iam_roles()
-        delete_s3_buckets()
+
+        if delete_s3:
+            delete_s3_buckets()
+        else:
+            logger.info("Skipping S3 bucket deletion (not requested)")
+
         delete_secrets()
 
-        wait_for_cloudfront_disabled()
-        delete_cloudfront_distributions()
-        delete_cloudfront_oai()
+        if delete_cloudfront:
+            wait_for_cloudfront_disabled()
+            delete_cloudfront_distributions()
+            delete_cloudfront_oai()
+        else:
+            logger.info("Skipping CloudFront deletion (not requested)")
 
         elapsed_time = time.time() - start_time
         logger.info("")
@@ -545,9 +594,11 @@ def main():
         logger.info("Infrastructure Cleanup Completed!")
         logger.info("=" * 60)
         logger.info(f"Total cleanup time: {elapsed_time / 60:.2f} minutes")
-        logger.info(
-            "Note: If CloudFront deletion was skipped, re-run after distributions are fully disabled"
-        )
+        if delete_cloudfront:
+            logger.info(
+                "Note: If CloudFront deletion was skipped, re-run with CloudFront "
+                "deletion enabled after distributions are fully disabled"
+            )
         logger.info("=" * 60)
 
     except Exception as e:

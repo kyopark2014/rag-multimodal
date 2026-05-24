@@ -58,8 +58,20 @@ def _object_name_from_key(key: str) -> str:
 
 
 def metadata_key_for_doc_key(key: str) -> str:
-    object_name = _object_name_from_key(key)
-    return f"{meta_prefix}{object_name}.metadata.json"
+    """Map docs/foo.pdf → metadata/foo.md.metadata.json (multimodal indexes .md)."""
+    rel = _object_name_from_key(key)
+    base = os.path.basename(rel)
+    stem, ext = os.path.splitext(base)
+    if ext.lower() == ".pdf":
+        return f"{meta_prefix}{stem}.md.metadata.json"
+    return f"{meta_prefix}{base}.metadata.json"
+
+
+def companion_md_key_for_doc_key(key: str) -> str:
+    """Map docs/foo.pdf → markdown/foo.md (multimodal img2text S3 output)."""
+    rel = _object_name_from_key(key)
+    stem, _ = os.path.splitext(os.path.basename(rel))
+    return f"markdown/{stem}.md"
 
 
 def _delete_ids_from_opensearch(ids: list) -> tuple:
@@ -115,7 +127,7 @@ def delete_document_if_exist(metadata_key: str) -> bool:
 
 
 def handle_pdf_delete(bucket: str, key: str) -> None:
-    """On PDF removal under docs/, purge OpenSearch vectors via metadata file."""
+    """On PDF removal under docs/, purge OpenSearch vectors and companion .md."""
     key = unquote_plus(key)
     file_type = key[key.rfind(".") + 1 :].lower()
     if file_type != "pdf":
@@ -129,24 +141,18 @@ def handle_pdf_delete(bucket: str, key: str) -> None:
     metadata_key = metadata_key_for_doc_key(key)
     print("metadata_key: ", metadata_key)
 
-    try:
-        metadata_obj = s3_client.get_object(Bucket=bucket, Key=metadata_key)
-        metadata_body = metadata_obj["Body"].read().decode("utf-8")
-        metadata = json.loads(metadata_body)
-        print("metadata: ", metadata)
-        document_id = metadata.get("DocumentId")
-        print("documentId: ", document_id)
-    except Exception:
-        print("err_msg: ", traceback.format_exc())
-        return
-
-    if not document_id:
-        return
+    companion_md_key = companion_md_key_for_doc_key(key)
+    print("companion_md_key: ", companion_md_key)
 
     try:
+        # delete documents of opensearch based on metadata.json
         if delete_document_if_exist(metadata_key):
             print("delete metadata: ", metadata_key)
             s3_client.delete_object(Bucket=bucket, Key=metadata_key)
+
+        # delete markdown file 
+        s3_client.delete_object(Bucket=bucket, Key=companion_md_key)
+        print("delete companion md: ", companion_md_key)
     except Exception:
         print("err_msg: ", traceback.format_exc())
         raise

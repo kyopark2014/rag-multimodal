@@ -37,6 +37,7 @@ s3_bucket = config.get("s3_bucket")
 region = config.get("region", "us-west-2")
 sharing_url = (config.get("sharing_url") or "").rstrip("/")
 s3_prefix = "docs"
+markdown_s3_prefix = "markdown"
 contextual_embedding = "Disable"
 meta_prefix = "metadata/"
 
@@ -222,7 +223,13 @@ def create_metadata(bucket, key, meta_prefix, url, category, documentId, ids, fi
     }
     print('metadata: ', metadata)
 
-    objectName = (key[key.find(s3_prefix)+len(s3_prefix)+1:len(key)])
+    if markdown_s3_prefix in key:
+        rel_key = key[key.find(markdown_s3_prefix) + len(markdown_s3_prefix) + 1 :]
+    elif s3_prefix in key:
+        rel_key = key[key.find(s3_prefix) + len(s3_prefix) + 1 :]
+    else:
+        rel_key = key
+    objectName = os.path.basename(rel_key)
     print('objectName: ', objectName)
 
     client = boto3.client('s3')
@@ -472,7 +479,7 @@ def img2text(images: list[str], folder_name: Optional[str] = None) -> list[str]:
     # Upload concatenated page text as a single markdown file to S3
     extracted_text = '\n'.join(pages)
     s3_client = boto3.client("s3", region_name=region) if s3_bucket else None
-    s3_key = f"{s3_prefix}/{folder_name}/{folder_name}.md"
+    s3_key = f"{markdown_s3_prefix}/{folder_name}.md"
     s3_client.put_object(
         Bucket=s3_bucket,
         Key=s3_key,
@@ -483,7 +490,7 @@ def img2text(images: list[str], folder_name: Optional[str] = None) -> list[str]:
 
     # Log the CloudFront sharing URL for the uploaded markdown
     config = utils.load_config()
-    markdown_url = config['sharing_url'] + f"/{s3_prefix}/{folder_name}/{folder_name}.md"
+    markdown_url = config['sharing_url'] + f"/{markdown_s3_prefix}/{folder_name}.md"
     logger.info(f"markdown_url: {markdown_url}")
 
     # Wrap each page with <pages> tags for RAG page metadata
