@@ -214,6 +214,8 @@ with st.sidebar:
 st.title('🔮 '+ mode)
 
 if clear_button==True:    
+    uploaded_file = None
+    pasted_image = None
     chat.map_chain = dict() 
     chat.checkpointers = dict() 
     chat.memorystores = dict() 
