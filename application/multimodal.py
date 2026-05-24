@@ -39,7 +39,6 @@ region = config.get("region", "us-west-2")
 sharing_url = (config.get("sharing_url") or "").rstrip("/")
 s3_prefix = "docs"
 markdown_s3_prefix = "markdown"
-contextual_embedding = "Enable"
 meta_prefix = "metadata/"
 
 LLM_PROMPT = (
@@ -307,7 +306,7 @@ def add_to_opensearch(body, name: str = "", url: str = ""):
         logger.info(f"splitted_docs[0]: {splitted_docs[0].page_content}")
 
     parent_docs = []
-    if contextual_embedding == 'Enable':
+    if chat.contextual_embedding == 'Enable':
         whole_doc = Document(page_content=body, metadata=dict(doc_metadata))
         parent_docs, contexualized_chunks = get_contextual_docs_from_chunks(whole_doc, splitted_docs)
 
@@ -322,8 +321,8 @@ def add_to_opensearch(body, name: str = "", url: str = ""):
             text = doc.page_content
 
             pages = []
-            open_tag = "<pages>"
-            close_tag = "</pages>"
+            open_tag = "<page>"
+            close_tag = "</page>"
             start = 0
             while True:
                 page_tag = text.find(open_tag, start)
@@ -340,16 +339,16 @@ def add_to_opensearch(body, name: str = "", url: str = ""):
             logger.info(f"related pages: {pages}")
             
             if pages:
-                doc.metadata["pages"] = pages[0] # first page number
-                lastest_page = pages[-1]
+                doc.metadata["page"] = int(pages[0]) # first page number
+                lastest_page = int(pages[-1])
             else:
-                doc.metadata["pages"] = lastest_page
+                doc.metadata["page"] = int(lastest_page)
                 logger.info(f"lastest_page: {lastest_page}") # use latest page number if no pages tag
 
             doc.metadata["doc_level"] = "parent"
 
-            # remove <pages> tags from content
-            parent_docs[i].page_content = re.sub(r'\n<pages>\d+</pages>\n', '', doc.page_content)
+            # remove <page> tags from content
+            doc.page_content = re.sub(r'\n<page>\d+</page>', '', doc.page_content)
 
         logger.info(f"parent_docs[0]: {parent_docs[0].page_content}")
 
@@ -358,18 +357,18 @@ def add_to_opensearch(body, name: str = "", url: str = ""):
             logger.info(f"parent_doc_ids: {parent_doc_ids}")
             ids = parent_doc_ids
 
-            for i, doc in enumerate(splitted_docs):
+            for i, doc in enumerate(parent_docs):
                 _id = parent_doc_ids[i]
                 child_docs = child_splitter.split_documents([doc])
                 for _doc in child_docs:
                     _doc.metadata["parent_doc_id"] = _id
                     _doc.metadata["doc_level"] = "child"
 
-                if contextual_embedding == 'Enable':
+                if chat.contextual_embedding == 'Enable':
                     contexualized_child_docs = [] # contexualized child doc
                     for _doc in child_docs:
-                        # remove <pages> tags from content
-                        page_content = re.sub(r'\n<pages>\d+</pages>\n', '', _doc.page_content)
+                        # remove <page> tags from content
+                        page_content = re.sub(r'\n<page>\d+</page>\n', '', _doc.page_content)
                         
                         contexualized_child_docs.append(
                             Document(
@@ -468,21 +467,21 @@ def pdf_to_images(file_url: str, dpi: Optional[int] = None) -> list[str]:
             os.remove(pdf_path)
 
 
-def img2text(images: list[str], folder_name: Optional[str] = None) -> list[str]:
+def img2text(images: list[str], filename: Optional[str] = None) -> list[str]:
     """Convert images to per-page markdown files (e.g. page_001.png → page_001.md).
 
-    Markdown files are always written under ``artifacts/<folder_name>/``.
+    Markdown files are always written under ``artifacts/<filename>/``.
 
     Args:
         images: List of absolute paths to the image files.
-        folder_name: Artifacts subfolder name (defaults to parent dir of the first image).
+        filename: Artifacts subfolder name (defaults to parent dir of the first image).
 
     Returns:
         List of absolute paths to the generated markdown files.
     """
-    if folder_name is None:
-        folder_name = os.path.basename(os.path.dirname(images[0]))
-    output_dir = os.path.join(ARTIFACTS_DIR, folder_name)
+    if filename is None:
+        filename = os.path.basename(os.path.dirname(images[0]))
+    output_dir = os.path.join(ARTIFACTS_DIR, filename)
     os.makedirs(output_dir, exist_ok=True)
     saved: list[str] = []
 
@@ -514,7 +513,7 @@ def img2text(images: list[str], folder_name: Optional[str] = None) -> list[str]:
     # Upload concatenated page text as a single markdown file to S3
     extracted_text = '\n'.join(pages)
     s3_client = boto3.client("s3", region_name=region) if s3_bucket else None
-    s3_key = f"{markdown_s3_prefix}/{folder_name}.md"
+    s3_key = f"{markdown_s3_prefix}/{filename}.md"
     s3_client.put_object(
         Bucket=s3_bucket,
         Key=s3_key,
@@ -525,28 +524,28 @@ def img2text(images: list[str], folder_name: Optional[str] = None) -> list[str]:
 
     # Log the CloudFront sharing URL for the uploaded markdown
     config = utils.load_config()
-    markdown_url = config['sharing_url'] + f"/{markdown_s3_prefix}/{folder_name}.md"
+    markdown_url = config['sharing_url'] + f"/{markdown_s3_prefix}/{filename}.md"
     logger.info(f"markdown_url: {markdown_url}")
 
-    # Wrap each page with <pages> tags for RAG page metadata
+    # Wrap each page with <page> tags for RAG page metadata
     rag_body = ""    
-    md_path = os.path.join(output_dir, f"{folder_name}.md")    
+    md_path = os.path.join(output_dir, f"{filename}.md")    
     for i, page in enumerate(pages):
-        tag = f'\n<pages>{i}</pages>\n'
+        tag = f'\n<page>{i+1}</page>\n'
         rag_body += f"{page}{tag}"    
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(rag_body)
 
     # add to opensearch
-    path = (config.get("sharing_url") or sharing_url or "").rstrip("/")
-    doc_url = f"{path}/{parse.quote(s3_key)}" if path else ""
-    ids = add_to_opensearch(rag_body, name=s3_key, url=doc_url)
+    path = (config.get("sharing_url") or sharing_url or "").rstrip("/")    
+    doc_url = f"{path}/{s3_prefix}/{filename}.pdf" if path else ""
+
+    ids = add_to_opensearch(rag_body, name=filename, url=doc_url)
 
     # metadata for the document
     category = "upload"
     documentId = get_documentId(s3_key, category)
     create_metadata(bucket=s3_bucket, key=s3_key, meta_prefix=meta_prefix, url=doc_url or path + parse.quote(s3_key), category=category, documentId=documentId, ids=ids, files=saved)
-
 
     return extracted_text        
 
@@ -558,5 +557,5 @@ def sync_data_source(file_url: str) -> Optional[list[str]]:
         logger.warning("No images generated from PDF")
         return None
 
-    extracted_body = img2text(images, folder_name=stem)
+    extracted_body = img2text(images, filename=stem)
     return extracted_body if extracted_body else None

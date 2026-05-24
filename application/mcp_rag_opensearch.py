@@ -1,7 +1,6 @@
 import json
 import logging
 import sys
-
 import boto3
 import utils
 from botocore.config import Config
@@ -27,7 +26,6 @@ if opensearch_url is None:
 projectName = config.get("projectName", "langgraph-nova")
 region = config.get("region", "us-west-2")
 
-enableParentDocumentRetrival = "Enable"
 enableHybridSearch = "Enable"
 
 index_name = projectName
@@ -92,9 +90,11 @@ def lexical_search(query, top_k):
 
         url = metadata.get("url", "") or ""
 
+        reference_content = reference_content_from_text(excerpt)
+
         docs.append(
             Document(
-                page_content=excerpt,
+                page_content=reference_content,
                 metadata={
                     "name": name,
                     "url": url,
@@ -105,7 +105,7 @@ def lexical_search(query, top_k):
         )
 
     for i, doc in enumerate(docs):
-        text = doc.page_content[:100] if len(doc.page_content) >= 100 else doc.page_content
+        text = doc.page_content[:200] if len(doc.page_content) >= 200 else doc.page_content
         logger.info(f"--> lexical search doc[{i}]: {text}, metadata:{doc.metadata}")
 
     return docs
@@ -121,6 +121,51 @@ def get_parent_content(parent_doc_id):
     url = metadata.get("url", "") or ""
 
     return source["text"], name, url
+
+
+_CONTEXTUAL_PREFIX_MARKERS = (
+    "이 청크",
+    "This chunk",
+    "이 문서",
+    "This document",
+    "The chunk",
+)
+_BODY_START_MARKERS = ("---", "#", "|", "<page>")
+
+
+def content_after_first_separator(content: str, separator: str = "---") -> str:
+    """Return text after the first '---' separator (skip prefix before the body)."""
+    if not content:
+        return content
+    idx = content.find(separator)
+    if idx == -1:
+        return content
+    return content[idx + len(separator) :].lstrip("\n")
+
+
+def strip_contextual_prefix(content: str) -> str:
+    """Remove contextual embedding prefix when present (context + \\n\\n + body)."""
+    if not content:
+        return content
+
+    stripped = content.lstrip("\n")
+    if "\n\n" not in stripped:
+        return content
+
+    prefix, body = stripped.split("\n\n", 1)
+    body = body.lstrip("\n")
+
+    if body.startswith(_BODY_START_MARKERS):
+        return body
+    if prefix.startswith(_CONTEXTUAL_PREFIX_MARKERS):
+        return body
+
+    return content
+
+
+def reference_content_from_text(text: str) -> str:
+    """Prepare text for RAG reference (strip contextual prefix when indexed with it)."""
+    return strip_contextual_prefix(text)
 
 
 def get_embedding():
@@ -177,81 +222,69 @@ def retrieve_documents_from_opensearch(query, top_k):
         connection_class=RequestsHttpConnection,
     )
 
-    relevant_docs = []
-    if enableParentDocumentRetrival == "Enable":
-        result = vectorstore_opensearch.similarity_search_with_score(
-            query=query,
-            k=top_k * 2,
-            search_type="script_scoring",
-            pre_filter={"term": {"metadata.doc_level": "child"}},
-        )
-        logger.info(f"result: {result}")
+    result = vectorstore_opensearch.similarity_search_with_score(
+        query=query,
+        k=top_k * 2,
+        search_type="script_scoring",
+        pre_filter={"term": {"metadata.doc_level": "child"}},
+    )
+    # logger.info(f"result: {result}")
 
-        relevant_documents = []
-        docList = []
-        for re in result:
-            if "parent_doc_id" in re[0].metadata:
-                parent_doc_id = re[0].metadata["parent_doc_id"]
-                doc_level = re[0].metadata["doc_level"]
-                logger.info(f"doc_level: {doc_level}, parent_doc_id: {parent_doc_id}")
+    relevant_documents = []
+    docList = []
+    for re in result:
+        if "parent_doc_id" in re[0].metadata:
+            parent_doc_id = re[0].metadata["parent_doc_id"]
+            doc_level = re[0].metadata["doc_level"]
+            logger.info(f"doc_level: {doc_level}, parent_doc_id: {parent_doc_id}")
 
-                if doc_level == "child":
-                    if parent_doc_id in docList:
-                        logger.info("duplicated")
-                    else:
-                        relevant_documents.append(re)
-                        docList.append(parent_doc_id)
-                        if len(relevant_documents) >= top_k:
-                            break
+            if doc_level == "child":
+                if parent_doc_id in docList:
+                    logger.info("duplicated")
+                else:
+                    relevant_documents.append(re)
+                    docList.append(parent_doc_id)
+                    if len(relevant_documents) >= top_k:
+                        break
 
-        for i, doc in enumerate(relevant_documents):
-            text = doc[0].page_content[:100] if len(doc[0].page_content) >= 100 else doc[0].page_content
-            logger.info(f"--> vector search doc[{i}]: {text}, metadata:{doc[0].metadata}")
+    for i, doc in enumerate(relevant_documents):
+        text = doc[0].page_content[:100] if len(doc[0].page_content) >= 100 else doc[0].page_content
+        logger.info(f"--> vector search doc[{i}]: {text}, metadata:{doc[0].metadata}")
 
-        for i, document in enumerate(relevant_documents):
-            logger.info(f"## Document(opensearch-vector) {i+1}: {document}")
+    relevant_docs = []    
+    for i, (child_doc, score) in enumerate(relevant_documents):
+        metadata = child_doc.metadata
+        parent_doc_id = metadata["parent_doc_id"]
+        doc_level = metadata["doc_level"]
+        page = metadata.get("page", "") or ""
 
-            parent_doc_id = document[0].metadata["parent_doc_id"]
-            doc_level = document[0].metadata["doc_level"]
-
-            content, name, url = get_parent_content(parent_doc_id)
-
-            relevant_docs.append(
-                Document(
-                    page_content=content,
-                    metadata={
-                        "name": name,
-                        "url": url,
-                        "doc_level": doc_level,
-                        "from": "vector",
-                    },
-                )
-            )
-    else:
-        relevant_documents = vectorstore_opensearch.similarity_search_with_score(
-            query=query,
-            k=top_k,
+        logger.info(
+            f"## Document(opensearch-vector) {i+1}: parent_doc_id={parent_doc_id}, page={page}, score={score}"
         )
 
-        for i, document in enumerate(relevant_documents):
-            logger.info(f"## Document(opensearch-vector) {i+1}: {document}")
-            name = document[0].metadata.get("name", "") or ""
-            url = document[0].metadata.get("url", "") or ""
-            content = document[0].page_content
+        content, name, url = get_parent_content(parent_doc_id)
+        logger.info(f"content: {content}")
 
-            relevant_docs.append(
-                Document(
-                    page_content=content,
-                    metadata={
-                        "name": name,
-                        "url": url,
-                        "from": "vector",
-                    },
-                )
+        body = content_after_first_separator(content)
+        reference_content = reference_content_from_text(body)
+        logger.info(f"reference_content: {reference_content}")
+
+        relevant_docs.append(
+            Document(
+                page_content=reference_content,
+                metadata={
+                    "name": name,
+                    "url": url,
+                    "doc_level": doc_level,
+                    "page": page,
+                    "from": "vector",
+                },
             )
-
+        )
+        logger.info(f"reference_content: {reference_content}")
+    
     if enableHybridSearch == "Enable":
-        relevant_docs += lexical_search(query, top_k)
+        relevant_docs += lexical_search(query, top_k/2)
 
     return relevant_docs
 
@@ -263,15 +296,24 @@ def retrieve(query: str) -> str:
     relevant_docs = retrieve_documents_from_opensearch(query, number_of_results)
 
     json_docs = []
-    for doc in relevant_docs:
+    seen_contents = set()
+    for i, doc in enumerate(relevant_docs):
+        logger.info(f"doc[{i}]: {doc}")
+
+        if doc.page_content in seen_contents:
+            continue
+        seen_contents.add(doc.page_content)
+
         name = doc.metadata.get("name", "") or ""
         title = name.split("/")[-1] if name else name
+        page = doc.metadata.get("page", "")
         json_docs.append(
             {
                 "contents": doc.page_content,
                 "reference": {
                     "url": doc.metadata.get("url", ""),
                     "title": title,
+                    "page": page,
                     "from": doc.metadata.get("from", "RAG"),
                 },
             }

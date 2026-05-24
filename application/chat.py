@@ -86,7 +86,7 @@ number_of_models = len(models)
 model_id = models[0]["model_id"]
 debug_mode = "Enable"
 skill_mode = "Disable"
-
+contextual_embedding = "Enable"
 user_id = "agent"
 multi_region = 'Disable'
 
@@ -254,7 +254,7 @@ def get_chat():
 
 def print_doc(i, doc):
     if len(doc.page_content)>=100:
-        text = doc.page_content[:100]
+        text = doc.page_content[:200]
     else:
         text = doc.page_content
             
@@ -1194,8 +1194,12 @@ def run_rag_with_knowledge_base(query, st):
     if relevant_docs:
         ref = "\n\n### Reference\n"
         for i, doc in enumerate(relevant_docs):
-            page_content = doc["contents"][:100].replace("\n", "")
-            ref += f"{i+1}. [{doc['reference']['title']}]({doc['reference']['url']}), {page_content}...\n"    
+            page_content = doc["contents"][:200].replace("\n", "")
+            page = doc["reference"].get("page")
+            page_part = f", page {page}" if page not in (None, "") else ""
+            ref_from = doc["reference"].get("from")
+            from_part = f", {ref_from}" if ref_from in ("vector", "lexical") else ""
+            ref += f"{i+1}. [{doc['reference']['title']}]({doc['reference']['url']}){page_part}{from_part}, {page_content}...\n"    
         logger.info(f"ref: {ref}")
         msg += ref
     
@@ -1276,7 +1280,7 @@ def get_tool_info(tool_name, tool_content):
                 tool_references.append({
                     "url": metadata["url"], 
                     "title": filename,
-                    "content": content_part[:100] + "..." if len(content_part) > 100 else content_part
+                    "content": content_part[:200] + "..." if len(content_part) > 100 else content_part
                 })
                 
         logger.info(f"content: {content}")
@@ -1325,7 +1329,7 @@ def get_tool_info(tool_name, tool_content):
                 if isinstance(item, dict) and 'url' in item and 'title' in item:
                     url = item['url']
                     title = item['title']
-                    content_text = item.get('context', '')[:100] + "..." if len(item.get('context', '')) > 100 else item.get('context', '')
+                    content_text = item.get('context', '')[:200] + "..." if len(item.get('context', '')) > 100 else item.get('context', '')
                     tool_references.append({
                         "url": url,
                         "title": title,
@@ -1400,7 +1404,7 @@ def get_tool_info(tool_name, tool_content):
                                 if content_start < len(result):
                                     content_text = result[content_start:].strip()
                                     # Truncate content for display
-                                    display_content = content_text[:100] + "..." if len(content_text) > 100 else content_text
+                                    display_content = content_text[:200] + "..." if len(content_text) > 100 else content_text
                                     display_content = display_content.replace("\n", "")
                                     
                                     tool_references.append({
@@ -1458,14 +1462,18 @@ def get_tool_info(tool_name, tool_content):
                     if "reference" in item and "contents" in item:
                         url = item["reference"]["url"]
                         title = item["reference"]["title"]
-                        content_text = item["contents"][:100] + "..." if len(item["contents"]) > 100 else item["contents"]
+                        page = item["reference"].get("page", "")
+                        ref_from = item["reference"].get("from", "")
+                        content_text = item["contents"][:200] + "..." if len(item["contents"]) > 100 else item["contents"]
                         tool_references.append({
                             "url": url,
                             "title": title,
+                            "page": page,
+                            "from": ref_from,
                             "content": content_text
                         })
             elif isinstance(json_data, list):
-                logger.info(f"json_data is a list: {json_data}")
+                # logger.info(f"json_data is a list: {json_data}")
                 for item in json_data:
                     if isinstance(item, dict) and "text" in item:
                         try:
@@ -1477,20 +1485,28 @@ def get_tool_info(tool_name, tool_content):
                                     if isinstance(ref_item, dict) and "reference" in ref_item and "contents" in ref_item:
                                         url = ref_item["reference"]["url"]
                                         title = ref_item["reference"]["title"]
-                                        content_text = ref_item["contents"][:100] + "..." if len(ref_item["contents"]) > 100 else ref_item["contents"]
+                                        page = ref_item["reference"].get("page", "")
+                                        ref_from = ref_item["reference"].get("from", "")
+                                        content_text = ref_item["contents"][:200] + "..." if len(ref_item["contents"]) > 100 else ref_item["contents"]
                                         tool_references.append({
                                             "url": url,
                                             "title": title,
+                                            "page": page,
+                                            "from": ref_from,
                                             "content": content_text
                                         })
                             elif isinstance(text_json, dict) and "reference" in text_json and "contents" in text_json:
                                 # Parsed JSON is a dict
                                 url = text_json["reference"]["url"]
                                 title = text_json["reference"]["title"]
-                                content_text = text_json["contents"][:100] + "..." if len(text_json["contents"]) > 100 else text_json["contents"]
+                                page = text_json["reference"].get("page", "")
+                                ref_from = text_json["reference"].get("from", "")
+                                content_text = text_json["contents"][:200] + "..." if len(text_json["contents"]) > 100 else text_json["contents"]
                                 tool_references.append({
                                     "url": url,
                                     "title": title,
+                                    "page": page,
+                                    "from": ref_from,
                                     "content": content_text
                                 })
                         except (json.JSONDecodeError, TypeError) as e:
@@ -1500,10 +1516,14 @@ def get_tool_info(tool_name, tool_content):
                         # List item has reference directly
                         url = item["reference"]["url"]
                         title = item["reference"]["title"]
-                        content_text = item["contents"][:100] + "..." if len(item["contents"]) > 100 else item["contents"]
+                        page = item["reference"].get("page", "")
+                        ref_from = item["reference"].get("from", "")
+                        content_text = item["contents"][:200] + "..." if len(item["contents"]) > 100 else item["contents"]
                         tool_references.append({
                             "url": url,
                             "title": title,
+                            "page": page,
+                            "from": ref_from,
                             "content": content_text
                         })
                 

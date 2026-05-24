@@ -806,7 +806,7 @@ async def call_model(state: State, config):
             response = merged if isinstance(merged, AIMessage) else AIMessage(
                 content=getattr(merged, "content", str(merged))
             )
-        logger.info(f"response of call_model: {response}")
+        # logger.info(f"response of call_model: {response}")
 
     except Exception:
         response = AIMessage(content="답변을 찾지 못하였습니다.")
@@ -1034,6 +1034,33 @@ active_mcp_servers = []
 active_skills = []
 current_id = None
 
+
+def _dedupe_references(references: list) -> list:
+    seen = set()
+    unique = []
+    for r in references:
+        key = (r.get("url"), r.get("title"), r.get("page"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
+    return unique
+
+
+async def _prior_tool_call_ids(app, config) -> set:
+    try:
+        snapshot = await app.aget_state(config)
+        messages = snapshot.values.get("messages", []) if snapshot else []
+        return {
+            msg.tool_call_id
+            for msg in messages
+            if isinstance(msg, ToolMessage) and msg.tool_call_id
+        }
+    except Exception:
+        logger.warning("Could not load prior tool call ids", exc_info=True)
+        return set()
+
+
 async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, history_mode: str="Disable", notification_queue: NotificationQueue =None) -> tuple[str, list]:
     global app, config, active_mcp_servers, active_skills, current_id
     
@@ -1059,6 +1086,10 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
     inputs = {
         "messages": [HumanMessage(content=query)]
     }
+
+    prior_tool_call_ids = set()
+    if history_mode == "Enable":
+        prior_tool_call_ids = await _prior_tool_call_ids(app, config)
             
     result = ""
     tool_used = False  # Track if tool was used
@@ -1107,7 +1138,11 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
                         
         elif isinstance(stream[0], ToolMessage):
             message = stream[0]
-            logger.info(f"ToolMessage: {message.name}, {message.content}")
+            if message.tool_call_id in prior_tool_call_ids:
+                continue
+            prior_tool_call_ids.add(message.tool_call_id)
+
+            # logger.info(f"ToolMessage: {message.name}, {message.content}")
             tool_name = message.name
             toolResult = message.content
             toolUseId = message.tool_call_id
@@ -1120,11 +1155,11 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
             if refs:
                 for r in refs:
                     references.append(r)
-                logger.info(f"refs: {refs}")
+                # logger.info(f"refs: {refs}")
             if tool_urls:
                 for url in tool_urls:
                     artifacts.append(url)
-                logger.info(f"tool_urls: {tool_urls}")
+                # logger.info(f"tool_urls: {tool_urls}")
 
             if isinstance(toolResult, str):
                 if "[artifacts]" in toolResult:
@@ -1149,11 +1184,16 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
         result = "답변을 찾지 못하였습니다."        
     logger.info(f"result: {result}")
 
+    references = _dedupe_references(references)
     if references:
         ref = "\n\n### Reference\n"
         for i, reference in enumerate(references):
-            page_content = reference['content'][:100].replace("\n", "")
-            ref += f"{i+1}. [{reference['title']}]({reference['url']}), {page_content}...\n"    
+            page_content = reference['content'][:200].replace("\n", "")
+            page = reference.get("page")
+            page_part = f", page {page}" if page not in (None, "") else ""
+            ref_from = reference.get("from")
+            from_part = f", {ref_from}" if ref_from in ("vector", "lexical") else ""
+            ref += f"{i+1}. [{reference['title']}]({reference['url']}){page_part}{from_part}, {page_content}...\n"
         result += ref
     
     if notification_queue is not None and chat.debug_mode == "Enable":
