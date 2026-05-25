@@ -20,6 +20,10 @@
 
 전체 아키텍처는 아래와 같습니다. 개발 환경은 **로컬 PC** 기준입니다.
 
+
+<img width="900" alt="image" src="https://github.com/user-attachments/assets/f76f3457-764d-416c-911f-c7081b29510d" />
+
+
 1. Streamlit에서 PDF 업로드 → **S3** `docs/` 저장 (원본 참조용 **CloudFront** URL)
 2. [`multimodal.py`](./application/multimodal.py)가 페이지별 이미지 추출 → 멀티모달 LLM으로 **Markdown** 생성
 3. 청킹·임베딩 후 **OpenSearch** 적재, 벡터 `id`는 S3 `metadata/*.metadata.json`에 저장
@@ -40,9 +44,6 @@ flowchart TB
     S3 -->|ObjectRemoved| LM[Lambda]
     LM --> OS
 ``` 
-
-<img width="900" alt="image" src="https://github.com/user-attachments/assets/f76f3457-764d-416c-911f-c7081b29510d" />
-
 
 ## Managed vs Serverless OpenSearch
 
