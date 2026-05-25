@@ -30,20 +30,7 @@
 4. **Agent** 질의 시 opensearch MCP로 하이브리드 검색 → grading → 답변 context 구성
 5. S3에서 PDF 삭제 시 **Lambda**가 metadata의 `ids`로 OpenSearch 문서 정리
 
-```mermaid
-flowchart TB
-    U[사용자] -->|PDF 업로드| ST[Streamlit app.py]
-    ST --> S3[(S3 docs/)]
-    ST --> MM[multimodal.py]
-    MM -->|페이지 PNG| BR[Bedrock 멀티모달 OCR]
-    BR --> MD[Markdown + metadata]
-    MD --> OS[(OpenSearch)]
-    U -->|질문| AG[LangGraph Agent]
-    AG --> MCP[opensearch MCP]
-    MCP --> OS
-    S3 -->|ObjectRemoved| LM[Lambda]
-    LM --> OS
-``` 
+
 
 ## Managed vs Serverless OpenSearch
 
