@@ -6,7 +6,7 @@
 
 전체적인 architecture는 아래와 같습니다. 개발환경은 Local PC를 기준으로 구성합니다. 사용자가 streamlit을 이용해 파일을 업로드하면 Amazon S3에 파일을 저장합니다. 업로드된 파일인 CloudFront URL을 이용해 사용자가 원본 문서를 참조할때 이용됩니다. Streamlit에서 업로드한 파일은 [multimodal.py](./application/multimodal.py)을 이용해 PDF와 같은 문서의 각 페이지를 이미지로 변환한 후애 multimodal LLM을 이용하여 markdown 파일 형태로 변환됩니다. 이후 chunking과 embedding후에 OpenSarch에 push 됩니다. 이후 Agent에서 opensearch MCP를 호출하면 OpenSearch를 통해 관련된 문서를 조회하고 grading을 통해 적절한 문서가 선택되면 답변의 context로 활용됩니다. 사용자가 더이상 문서를 활용하지 않는다고 판단되면 Amazon S3의 docs에 저장되어 있는 문서파일을 삭제합니다. Amazon Lambda은 delete event를 받아서 trigger되고 Amazon S3에 있는 문서의 metadata를 load하여 OpenSearch의 문서 id들을 확인한 후에 OpenSearch에서 삭제합니다. 
 
-<img width="900" alt="image" src="https://github.com/user-attachments/assets/59203f73-c16c-4e98-b527-597a04888e8" />
+<img width="900" alt="image" src="https://github.com/user-attachments/assets/f76f3457-764d-416c-911f-c7081b29510d" />
 
 
 ## Managed vs Serverless OpenSearch
