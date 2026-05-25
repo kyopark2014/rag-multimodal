@@ -4,7 +4,7 @@
 
 파일업로드시 pdf의 경우에 각 page 단위로 이미지를 추출한 후에 OCR을 수행합니다. 이후 하나의 markdown 파일을 생성한 후에 chunking과 embedding후에 OpenSearch에 document를 추가합니다. Amazon S3에 저장된 파일이 삭제될 경우에는 해당 파일의 meta를 확인하여 OpenSearch에서 관련된 Document를 삭제합니다. OpenSearch에 저장되는 문서의 원할한 검색을 위해 metadata에 파일경로(url), 페이지 번호, 생성일, 생성자와 같은 정보를 추가하여 검색의 정확도를 높일 수 있습니다. 여기서는 데모 application을 위해 Streamlit을 이용합니다. Streamlit의 LangGraph agent는 OpenSearch를 검색하는 MCP를 이용하여 관련된 문서를 검색합니다. 이때, hybrid search를 이용해 vector와 lexical로 검색한 결과를 추출하고 관련도를 grading하여 관련도가 높은 문서를 context에 포함하여 적절한 답변을 생성합니다. 
 
-<img width="668" height="556" alt="image" src="https://github.com/user-attachments/assets/cc498265-1518-46cf-8d28-1a44ff92b517" />
+<img width="900" alt="image" src="https://github.com/user-attachments/assets/6032a21a-370c-491a-ae8f-018afd8884ae" />
 
 ## Managed vs Serverless OpenSearch
 
