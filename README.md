@@ -12,19 +12,6 @@
 
 **관련 예제:** [paddle-ocr](https://github.com/kyopark2014/paddle-ocr) · [multimodal-ocr](https://github.com/kyopark2014/multimodal-ocr)
 
-## 목차
-
-- [개요](#개요)
-- [Managed vs Serverless OpenSearch](#managed-vs-serverless-opensearch)
-- [Advanced RAG 기법](#advanced-rag-기법)
-- [프로젝트 구조](#프로젝트-구조)
-- [빠른 시작](#빠른-시작)
-- [설치](#설치)
-- [애플리케이션 실행](#애플리케이션-실행)
-- [사용 방법](#사용-방법)
-- [실행 결과](#실행-결과)
-- [관련 문서](#관련-문서)
-
 ## 개요
 
 여기에서는 Knowledge Base로 처리하기 어려운 복잡한 RAG 문제를 Multimodal LLM이 직접 파싱하는 방법을 설명합니다. 문서에 복잡한 표나 그림이 있는 경우에 [일반적인 OCR 모델](https://github.com/kyopark2014/paddle-ocr)로 문서를 분석하기 어렵습니다. 반면에 [Multimodal을 이용한 OCR](https://github.com/kyopark2014/multimodal-ocr)은 사람의 관점으로 문서를 정리할 수 있어서, AI application에서 표나 그림을 이해하는데 크게 도움이 됩니다. 
