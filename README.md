@@ -296,8 +296,9 @@ installer는 다음 리소스를 생성·구성합니다.
 
 ### OpenSearch Dashboards (브라우저 접속)
 
-installer는 OpenSearch **Fine-grained access control(FGAC)** 을 활성화하여 브라우저에서 Dashboards에 로그인할 수 있습니다. installer.py로 설치시 입력한 admin의 password를 이용해 접속합니다. 
+installer는 OpenSearch **Fine-grained access control(FGAC)** 을 활성화하여 브라우저에서 Dashboards에 로그인할 수 있습니다. installer.py로 설치시 입력한 admin의 password를 이용해 접속합니다. Dashboard에서 확인한 chunked document의 metadata는 아래와 같습니다.
 
+<img width="874" height="610" alt="image" src="https://github.com/user-attachments/assets/95cf1ebb-8dc2-4999-b3e8-0e3da89cc9ef" />
 
 
 ### 인프라 삭제
