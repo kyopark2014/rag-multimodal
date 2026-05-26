@@ -1,4 +1,4 @@
-# Multimodal을 이용해 Custom RAG 구현
+# Multimodal을 이용한 Custom RAG 구현
 
 복잡한 표·그림이 포함된 PDF를 **멀티모달 LLM**으로 Markdown으로 변환하고, **Amazon OpenSearch**에 인덱싱한 뒤 **LangGraph Agent**가 하이브리드 검색으로 답변하는 데모 프로젝트입니다.
 
