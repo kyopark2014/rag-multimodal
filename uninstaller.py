@@ -21,7 +21,7 @@ oai_comment = "OAI for RAG Project"
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
-vector_index_name = project_name
+opensearch_domain_name = project_name
 bucket_name = f"storage-for-rag-project-{account_id}-{region}"
 
 LAMBDA_S3_EVENT_FUNCTION_NAME = f"lambda-s3-event-manager-for-{project_name}"
@@ -35,7 +35,9 @@ iam_client = boto3.client("iam", region_name=region)
 lambda_client = boto3.client("lambda", region_name=region)
 sqs_client = boto3.client("sqs", region_name=region)
 secrets_client = boto3.client("secretsmanager", region_name=region)
-opensearch_client = boto3.client("opensearchserverless", region_name=region)
+# Managed Amazon OpenSearch Service (same as installer.py)
+es_client = boto3.client("es", region_name=region)
+opensearch_client = boto3.client("opensearch", region_name=region)
 cloudfront_client = boto3.client("cloudfront", region_name=region)
 bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
 
@@ -67,7 +69,7 @@ def _matches_cloudfront(dist: dict) -> bool:
 
 def disable_cloudfront_distributions():
     """Disable CloudFront distributions created by installer."""
-    logger.info("[1/6] Disabling CloudFront distributions")
+    logger.info("[1/7] Disabling CloudFront distributions")
 
     try:
         distributions = cloudfront_client.list_distributions()
@@ -122,7 +124,7 @@ def wait_for_cloudfront_disabled(max_wait: int = 900, poll_interval: int = 30):
 
 def delete_cloudfront_distributions():
     """Delete disabled CloudFront distributions."""
-    logger.info("[6/6] Deleting CloudFront distributions")
+    logger.info("[7/7] Deleting CloudFront distributions")
 
     try:
         distributions = cloudfront_client.list_distributions()
@@ -185,7 +187,7 @@ def delete_cloudfront_oai():
 
 def delete_knowledge_bases():
     """Delete Knowledge Bases and their data sources."""
-    logger.info("[2/6] Deleting Knowledge Bases")
+    logger.info("[2/7] Deleting Knowledge Bases")
 
     try:
         kb_list = bedrock_agent_client.list_knowledge_bases()
@@ -253,55 +255,154 @@ def delete_knowledge_bases():
         logger.error(f"Error deleting Knowledge Bases: {e}")
 
 
-def delete_opensearch_collection():
-    """Delete OpenSearch Serverless collection and policies."""
-    logger.info("[3/6] Deleting OpenSearch collection")
+def _dissociate_analysis_nori_package(domain_name: str) -> None:
+    """Dissociate analysis-nori package before deleting the domain (best-effort)."""
+    try:
+        response = opensearch_client.list_packages_for_domain(DomainName=domain_name)
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ResourceNotFoundException":
+            return
+        logger.warning(f"  Could not list domain packages: {e}")
+        return
 
-    collection_name = vector_index_name
+    for pkg in response.get("DomainPackageDetailsList", []):
+        if pkg.get("PackageName") != "analysis-nori":
+            continue
+        package_id = pkg.get("PackageID")
+        status = pkg.get("DomainPackageStatus")
+        if status in ("DISSOCIATING", "DISSOCIATION_FAILED"):
+            logger.info(
+                f"  analysis-nori already dissociating (status={status}, "
+                f"package {package_id})"
+            )
+            continue
+        try:
+            opensearch_client.dissociate_package(
+                PackageID=package_id, DomainName=domain_name
+            )
+            logger.info(
+                f"  ✓ Dissociated analysis-nori package {package_id} from {domain_name}"
+            )
+        except ClientError as e:
+            logger.warning(
+                f"  Could not dissociate analysis-nori ({package_id}): {e}"
+            )
+
+
+def _wait_for_opensearch_domain_deleted(
+    domain_name: str,
+    max_wait: int = 1800,
+    poll_interval: int = 30,
+    log_interval: int = 60,
+) -> bool:
+    """
+    Poll until the managed OpenSearch domain is fully gone.
+
+    Returns True if confirmed deleted, False on timeout.
+    Domain deletion is asynchronous and typically takes 10-30 minutes.
+    """
+    logger.info(
+        f"  Waiting for OpenSearch domain '{domain_name}' to be fully deleted "
+        f"(typically 10-30 min, timeout {max_wait // 60} min)..."
+    )
+
+    waited = 0
+    last_log = 0
+    while waited < max_wait:
+        try:
+            response = es_client.describe_elasticsearch_domain(DomainName=domain_name)
+            status = response["DomainStatus"]
+            deleted_flag = status.get("Deleted", False)
+            processing = status.get("Processing", False)
+            proc_status = (
+                status.get("DomainProcessingStatus")
+                or status.get("ProcessingStatus")
+            )
+
+            if waited - last_log >= log_interval or waited == 0:
+                logger.info(
+                    f"  [{waited // 60}m{waited % 60:02d}s/"
+                    f"{max_wait // 60}m] deleted={deleted_flag}, "
+                    f"processing={processing}, status={proc_status}"
+                )
+                last_log = waited
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ResourceNotFoundException":
+                logger.info(
+                    f"  ✓ OpenSearch domain '{domain_name}' fully deleted "
+                    f"(elapsed {waited // 60}m{waited % 60:02d}s)"
+                )
+                return True
+            logger.warning(f"  describe_elasticsearch_domain error: {e}")
+
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+    logger.warning(
+        f"  Timed out waiting for OpenSearch domain deletion after "
+        f"{max_wait // 60} minutes; deletion is still in progress in AWS"
+    )
+    return False
+
+
+def delete_opensearch_domain(wait: bool = True, wait_timeout: int = 1800):
+    """Delete managed Amazon OpenSearch Service domain created by installer.py."""
+    logger.info(f"[3/7] Deleting OpenSearch domain: {opensearch_domain_name}")
 
     try:
-        collection_id = None
-        collections = opensearch_client.list_collections()
-        for collection in collections.get("collectionSummaries", []):
-            if collection["name"] == collection_name:
-                collection_id = collection["id"]
-                break
-
-        if collection_id:
-            opensearch_client.delete_collection(id=collection_id)
-            logger.info(
-                f"  ✓ Initiated deletion of collection: {collection_name} (ID: {collection_id})"
+        already_deleting = False
+        try:
+            response = es_client.describe_elasticsearch_domain(
+                DomainName=opensearch_domain_name
             )
-            time.sleep(30)
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ResourceNotFoundException":
+                logger.info(f"  Domain {opensearch_domain_name} not found")
+                logger.info("✓ OpenSearch domain processed")
+                return
+            raise
+
+        status = response["DomainStatus"]
+        if status.get("Deleted"):
+            logger.info(
+                f"  Domain {opensearch_domain_name} is already being deleted"
+            )
+            already_deleting = True
         else:
-            logger.info(f"  Collection {collection_name} not found")
+            _dissociate_analysis_nori_package(opensearch_domain_name)
 
-        for policy_type, policy_name in [
-            ("data", f"data-{project_name}"),
-            ("network", f"net-{project_name}-{region}"),
-            ("encryption", f"enc-{project_name}-{region}"),
-        ]:
             try:
-                if policy_type == "data":
-                    opensearch_client.delete_access_policy(
-                        name=policy_name,
-                        type="data",
-                    )
-                else:
-                    opensearch_client.delete_security_policy(
-                        name=policy_name,
-                        type=policy_type,
-                    )
-                logger.info(f"  ✓ Deleted {policy_type} policy: {policy_name}")
+                es_client.delete_elasticsearch_domain(
+                    DomainName=opensearch_domain_name
+                )
+                logger.info(
+                    f"  ✓ Initiated deletion of OpenSearch domain: "
+                    f"{opensearch_domain_name}"
+                )
             except ClientError as e:
-                if e.response["Error"]["Code"] != "ResourceNotFoundException":
-                    logger.warning(
-                        f"  Could not delete {policy_type} policy {policy_name}: {e}"
-                    )
+                if e.response["Error"]["Code"] == "ResourceNotFoundException":
+                    logger.info(f"  Domain {opensearch_domain_name} already deleted")
+                    logger.info("✓ OpenSearch domain processed")
+                    return
+                raise
 
-        logger.info("✓ OpenSearch collection deleted")
+        if wait:
+            _wait_for_opensearch_domain_deleted(
+                opensearch_domain_name, max_wait=wait_timeout
+            )
+        else:
+            note = (
+                "deletion already in progress; "
+                if already_deleting
+                else ""
+            )
+            logger.info(
+                f"  Skipping wait ({note}check AWS console for completion)"
+            )
+
+        logger.info("✓ OpenSearch domain processed")
     except Exception as e:
-        logger.error(f"Error deleting OpenSearch collection: {e}")
+        logger.error(f"Error deleting OpenSearch domain: {e}")
 
 
 def _remove_s3_docs_lambda_notification():
@@ -439,7 +540,7 @@ def _empty_s3_bucket(bucket: str):
 
 def delete_s3_buckets():
     """Delete S3 bucket created by installer."""
-    logger.info("[5/6] Deleting S3 buckets")
+    logger.info("[6/7] Deleting S3 buckets")
 
     for bucket in [bucket_name]:
         try:
@@ -527,6 +628,17 @@ def main():
         action="store_true",
         help="Delete CloudFront distribution and OAI without prompting (default: keep)",
     )
+    parser.add_argument(
+        "--no-wait-opensearch",
+        action="store_true",
+        help="Do not wait for OpenSearch domain deletion to finish (default: wait)",
+    )
+    parser.add_argument(
+        "--opensearch-wait-timeout",
+        type=int,
+        default=1800,
+        help="Max seconds to wait for OpenSearch domain deletion (default: 1800)",
+    )
     args = parser.parse_args()
 
     if not args.yes:
@@ -570,7 +682,10 @@ def main():
             logger.info("Skipping CloudFront disable (not requested)")
 
         delete_knowledge_bases()
-        delete_opensearch_collection()
+        delete_opensearch_domain(
+            wait=not args.no_wait_opensearch,
+            wait_timeout=args.opensearch_wait_timeout,
+        )
         delete_lambda_s3_event_manager()
         delete_iam_roles()
 

@@ -315,6 +315,7 @@ def add_to_opensearch(body, name: str = "", url: str = ""):
     else:
         parent_docs = splitted_docs
 
+    ids = []
     if len(parent_docs):
         lastest_page = 0
         for i, doc in enumerate(parent_docs):

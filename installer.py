@@ -17,8 +17,9 @@ import sys
 import time
 import zipfile
 from botocore.exceptions import ClientError
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
+import requests
 from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
 
@@ -42,6 +43,14 @@ lambda_client = boto3.client("lambda", region_name=region)
 # OpenSearch managed domain (used by application/opensearch.py as managed_opensearch_url)
 opensearch_domain_name = project_name
 OPENSEARCH_MASTER_USERNAME = "admin"
+# application/config.json holds the (optional) saved Dashboards master password
+# so we can reuse it for FGAC role mappings without prompting on every run.
+APPLICATION_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "application", "config.json"
+)
+OPENSEARCH_CONFIG_PASSWORD_KEY = "managed_opensearch_dashboards_password"
+# FGAC security role used for the installer + app + lambda SigV4 callers.
+OPENSEARCH_BACKEND_ROLE_NAME = "all_access"
 
 bucket_name = f"storage-for-rag-project-{account_id}-{region}"
 
@@ -284,16 +293,145 @@ def _opensearch_domain_fgac_status() -> Optional[bool]:
         raise
 
 
+def _load_saved_opensearch_master_password() -> str:
+    """Read the master password previously saved to application/config.json (if any)."""
+    try:
+        with open(APPLICATION_CONFIG_PATH, "r") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return ""
+    return data.get(OPENSEARCH_CONFIG_PASSWORD_KEY, "") or ""
+
+
 def prompt_opensearch_master_password_if_needed() -> str:
-    """Prompt for the master password when FGAC is not yet enabled on the domain."""
+    """Return the master password, reusing or re-prompting as needed.
+
+    The password is required even on re-runs because FGAC rejects SigV4
+    callers until we map them as backend roles via the OpenSearch security
+    API (which only the admin user can call).
+    """
     fgac_status = _opensearch_domain_fgac_status()
     if fgac_status is True:
+        saved = _load_saved_opensearch_master_password()
+        if saved:
+            logger.info(
+                f"OpenSearch FGAC already enabled; "
+                f"reusing saved Dashboards password from "
+                f"{os.path.relpath(APPLICATION_CONFIG_PATH)}"
+            )
+            return saved
         logger.info(
-            f"OpenSearch fine-grained access control already enabled; "
-            f"skipping password prompt (Dashboards user: {OPENSEARCH_MASTER_USERNAME})"
+            f"OpenSearch FGAC already enabled but no saved password found in "
+            f"{os.path.relpath(APPLICATION_CONFIG_PATH)}; "
+            f"re-enter the existing '{OPENSEARCH_MASTER_USERNAME}' password "
+            f"so the installer can map IAM principals as backend_roles."
         )
-        return ""
+        return _prompt_opensearch_master_password_single()
     return prompt_opensearch_master_password()
+
+
+def _prompt_opensearch_master_password_single() -> str:
+    """Prompt once for the existing master password (no confirm step)."""
+    logger.info("")
+    logger.info(f"  Username: {OPENSEARCH_MASTER_USERNAME}")
+    while True:
+        password = getpass.getpass(
+            f"Enter existing password for '{OPENSEARCH_MASTER_USERNAME}': "
+        )
+        if password:
+            return password
+        logger.warning("Password cannot be empty. Try again.")
+
+
+def _opensearch_basic_auth_works(endpoint_url: str, password: str) -> bool:
+    """Probe whether (admin, password) is accepted by the OpenSearch security plugin."""
+    if not password:
+        return False
+    try:
+        resp = requests.get(
+            f"{endpoint_url.rstrip('/')}/_plugins/_security/api/account",
+            auth=(OPENSEARCH_MASTER_USERNAME, password),
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        logger.warning(f"  OpenSearch reachability check failed: {exc}")
+        return False
+    if resp.status_code == 200:
+        return True
+    if resp.status_code in (401, 403):
+        return False
+    logger.warning(
+        f"  Unexpected response while probing OpenSearch admin auth "
+        f"({resp.status_code}): {resp.text[:200]}"
+    )
+    return False
+
+
+def _reset_opensearch_master_password(domain_name: str) -> str:
+    """Reset the OpenSearch FGAC master user password via AWS API (admin-only)."""
+    new_password = prompt_opensearch_master_password()
+    logger.info(
+        f"  Resetting OpenSearch FGAC master password for "
+        f"'{OPENSEARCH_MASTER_USERNAME}' via AWS API..."
+    )
+    es_client.update_elasticsearch_domain_config(
+        DomainName=domain_name,
+        AdvancedSecurityOptions={
+            "Enabled": True,
+            "InternalUserDatabaseEnabled": True,
+            "MasterUserOptions": {
+                "MasterUserName": OPENSEARCH_MASTER_USERNAME,
+                "MasterUserPassword": new_password,
+            },
+        },
+    )
+    _wait_for_opensearch_domain_config(domain_name)
+    logger.info(
+        f"  ✓ Master password reset for '{OPENSEARCH_MASTER_USERNAME}'"
+    )
+    return new_password
+
+
+def ensure_opensearch_master_password_works(
+    endpoint_url: str,
+    domain_name: str,
+    candidate_password: str,
+) -> str:
+    """Validate the master password against the live cluster; reset on failure.
+
+    Returns a working master password (possibly different from the input).
+    """
+    if _opensearch_basic_auth_works(endpoint_url, candidate_password):
+        return candidate_password
+
+    logger.warning(
+        f"  '{OPENSEARCH_MASTER_USERNAME}' authentication rejected by "
+        f"OpenSearch (likely wrong password)."
+    )
+    for attempt in range(2):
+        retry = getpass.getpass(
+            f"Re-enter password for '{OPENSEARCH_MASTER_USERNAME}' "
+            f"(attempt {attempt + 1}/2, press Enter to reset via AWS API): "
+        )
+        if not retry:
+            break
+        if _opensearch_basic_auth_works(endpoint_url, retry):
+            logger.info("  ✓ OpenSearch admin authentication succeeded")
+            return retry
+        logger.warning("  Still rejected by OpenSearch.")
+
+    logger.info(
+        f"  Falling back to AWS-side password reset for "
+        f"'{OPENSEARCH_MASTER_USERNAME}' (set a new password below)."
+    )
+    new_password = _reset_opensearch_master_password(domain_name)
+    if not _opensearch_basic_auth_works(endpoint_url, new_password):
+        raise RuntimeError(
+            "OpenSearch admin password reset succeeded but the cluster still "
+            "rejects the new credentials — try again in a minute or check "
+            "the domain status in the AWS console."
+        )
+    return new_password
 
 
 def prompt_opensearch_master_password() -> str:
@@ -638,10 +776,12 @@ def _find_domain_analysis_nori_package(domain_name: str) -> Optional[Dict]:
     return None
 
 
-def _is_nori_analyzer_available(endpoint_url: str) -> bool:
+def _is_nori_analyzer_available(
+    endpoint_url: str, master_password: str = ""
+) -> bool:
     """True when the cluster can tokenize with the nori analyzer (plugin usable)."""
     try:
-        os_client = _get_opensearch_client(endpoint_url)
+        os_client = _get_opensearch_client(endpoint_url, master_password)
         response = os_client.indices.analyze(body={"analyzer": "nori", "text": "test"})
         return bool(response.get("tokens"))
     except Exception:
@@ -682,6 +822,7 @@ def ensure_analysis_nori_plugin(
     domain_name: str,
     engine_version: Optional[str] = None,
     endpoint_url: Optional[str] = None,
+    master_password: str = "",
 ) -> bool:
     """
     Ensure analysis-nori is on the domain (associate only if missing).
@@ -703,7 +844,9 @@ def ensure_analysis_nori_plugin(
             raise RuntimeError(
                 f"analysis-nori association failed: {existing.get('ErrorDetails')}"
             )
-        if endpoint_url and _is_nori_analyzer_available(endpoint_url):
+        if endpoint_url and _is_nori_analyzer_available(
+            endpoint_url, master_password
+        ):
             logger.info(
                 f"  Skipping analysis-nori wait — already linked ({status}, "
                 f"package {package_id}), nori analyzer is usable"
@@ -728,7 +871,9 @@ def ensure_analysis_nori_plugin(
 
     logger.info(f"  Associating analysis-nori package {package_id} ({engine_version})...")
     opensearch_client.associate_package(PackageID=package_id, DomainName=domain_name)
-    if endpoint_url and _is_nori_analyzer_available(endpoint_url):
+    if endpoint_url and _is_nori_analyzer_available(
+        endpoint_url, master_password
+    ):
         logger.info(
             f"  Nori analyzer usable before package ACTIVE — continuing (package {package_id})"
         )
@@ -738,26 +883,159 @@ def ensure_analysis_nori_plugin(
     return True
 
 
-def _get_opensearch_client(endpoint_url: str) -> OpenSearch:
-    """OpenSearch client with SigV4 auth (same as application/mcp_rag_opensearch.py)."""
-    session = boto3.Session(region_name=region)
-    credentials = session.get_credentials()
-    awsauth = AWS4Auth(
-        credentials.access_key,
-        credentials.secret_key,
-        region,
-        "es",
-        session_token=credentials.token,
-    )
+def _get_opensearch_client(
+    endpoint_url: str, master_password: str = ""
+) -> OpenSearch:
+    """OpenSearch client.
+
+    Uses HTTP basic auth (admin/master_password) when available so installer
+    operations work under FGAC even before IAM principals are mapped as
+    backend roles. Falls back to SigV4 (same as application/mcp_rag_opensearch.py)
+    when no master password is provided.
+    """
+    if master_password:
+        http_auth: object = (OPENSEARCH_MASTER_USERNAME, master_password)
+    else:
+        session = boto3.Session(region_name=region)
+        credentials = session.get_credentials()
+        http_auth = AWS4Auth(
+            credentials.access_key,
+            credentials.secret_key,
+            region,
+            "es",
+            session_token=credentials.token,
+        )
     return OpenSearch(
         hosts=[{"host": endpoint_url.replace("https://", ""), "port": 443}],
         http_compress=True,
-        http_auth=awsauth,
+        http_auth=http_auth,
         use_ssl=True,
         verify_certs=True,
         ssl_assert_hostname=False,
         ssl_show_warn=False,
         connection_class=RequestsHttpConnection,
+    )
+
+
+def _normalize_iam_arn_for_backend_role(arn: str) -> str:
+    """Convert STS assumed-role ARNs to their IAM role ARN form for FGAC.
+
+    `sts.get_caller_identity` returns
+    `arn:aws:sts::ACCOUNT:assumed-role/RoleName/SessionName` when called
+    from an assumed role; OpenSearch backend_role matching expects the
+    underlying IAM role ARN (`arn:aws:iam::ACCOUNT:role/RoleName`).
+    """
+    match = re.match(
+        r"^arn:aws:sts::(?P<account>\d+):assumed-role/(?P<role>[^/]+)/.*$", arn
+    )
+    if match:
+        return (
+            f"arn:aws:iam::{match.group('account')}:role/{match.group('role')}"
+        )
+    return arn
+
+
+def _get_caller_backend_role_arn() -> str:
+    """Backend role ARN for the IAM identity currently running the installer."""
+    return _normalize_iam_arn_for_backend_role(
+        sts_client.get_caller_identity()["Arn"]
+    )
+
+
+def _opensearch_security_request(
+    endpoint_url: str,
+    method: str,
+    path: str,
+    master_password: str,
+    body: Optional[Dict] = None,
+) -> requests.Response:
+    """Call OpenSearch security plugin with admin HTTP basic auth."""
+    url = f"{endpoint_url.rstrip('/')}{path}"
+    return requests.request(
+        method,
+        url,
+        auth=(OPENSEARCH_MASTER_USERNAME, master_password),
+        headers={"Content-Type": "application/json"},
+        data=json.dumps(body) if body is not None else None,
+        timeout=30,
+    )
+
+
+def ensure_opensearch_backend_role_mappings(
+    endpoint_url: str,
+    master_password: str,
+    iam_arns: Iterable[str],
+) -> None:
+    """Map IAM principals onto `all_access` so SigV4 callers work under FGAC.
+
+    For SigV4 requests, the OpenSearch security plugin treats the caller's
+    IAM ARN as the OpenSearch *username* (e.g. logs show
+    `name=arn:aws:iam::...:user/foo, backend_roles=[]`). To grant the role
+    we therefore have to add the ARN to the `users` list. We also keep it
+    in `backend_roles` so the same mapping works for SAML/IdP flows.
+    """
+    requested = sorted({arn for arn in iam_arns if arn})
+    if not requested:
+        return
+    if not master_password:
+        logger.warning(
+            "  Skipping FGAC role mapping — no master password available "
+            "(SigV4 callers will get 403 until they are mapped manually)."
+        )
+        return
+
+    path = f"/_plugins/_security/api/rolesmapping/{OPENSEARCH_BACKEND_ROLE_NAME}"
+    get_resp = _opensearch_security_request(
+        endpoint_url, "GET", path, master_password
+    )
+    if get_resp.status_code == 401:
+        raise RuntimeError(
+            "OpenSearch admin authentication failed while reading "
+            f"{OPENSEARCH_BACKEND_ROLE_NAME} role mapping — check the master "
+            "password saved in application/config.json."
+        )
+
+    if get_resp.status_code == 200:
+        current = get_resp.json().get(OPENSEARCH_BACKEND_ROLE_NAME, {}) or {}
+    elif get_resp.status_code == 404:
+        current = {}
+    else:
+        raise RuntimeError(
+            f"Failed to read {OPENSEARCH_BACKEND_ROLE_NAME} role mapping "
+            f"({get_resp.status_code}): {get_resp.text}"
+        )
+
+    existing_users = set(current.get("users", []) or [])
+    existing_backend = set(current.get("backend_roles", []) or [])
+    desired_users = existing_users.union(requested)
+    desired_backend = existing_backend.union(requested)
+    if desired_users == existing_users and desired_backend == existing_backend:
+        logger.info(
+            f"  FGAC {OPENSEARCH_BACKEND_ROLE_NAME} already maps "
+            f"{sorted(requested)}"
+        )
+        return
+
+    body: Dict[str, List[str]] = {
+        "users": sorted(desired_users),
+        "backend_roles": sorted(desired_backend),
+    }
+    if current.get("hosts"):
+        body["hosts"] = current["hosts"]
+
+    put_resp = _opensearch_security_request(
+        endpoint_url, "PUT", path, master_password, body=body
+    )
+    if put_resp.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Failed to update {OPENSEARCH_BACKEND_ROLE_NAME} role mapping "
+            f"({put_resp.status_code}): {put_resp.text}"
+        )
+    added_users = sorted(desired_users - existing_users)
+    added_backend = sorted(desired_backend - existing_backend)
+    logger.info(
+        f"  ✓ Mapped IAM principals to FGAC {OPENSEARCH_BACKEND_ROLE_NAME} "
+        f"(users+={added_users}, backend_roles+={added_backend})"
     )
 
 
@@ -876,10 +1154,12 @@ def create_rag_index(os_client: OpenSearch, index_name: str, use_nori: bool) -> 
         )
 
 
-def ensure_opensearch_index(endpoint_url: str, use_nori: bool = True) -> None:
+def ensure_opensearch_index(
+    endpoint_url: str, use_nori: bool = True, master_password: str = ""
+) -> None:
     """Ensure the RAG vector index exists on the managed OpenSearch domain."""
     logger.info(f"  Ensuring OpenSearch index: {project_name}")
-    os_client = _get_opensearch_client(endpoint_url)
+    os_client = _get_opensearch_client(endpoint_url, master_password)
     create_rag_index(os_client, project_name, use_nori=use_nori)
     logger.info(f"✓ OpenSearch index ready: {project_name}")
 
@@ -1369,13 +1649,25 @@ def deploy_lambda_s3_event_manager(
     s3_bucket_name: str,
     opensearch_endpoint: str,
     opensearch_domain_arn: str,
+    opensearch_master_password: str = "",
 ) -> Dict[str, str]:
     """
     Deploy lambda-s3-event-manager: IAM role, Lambda, S3 trigger on docs/.
+
+    Also maps the Lambda execution role ARN as an FGAC backend_role so the
+    function's SigV4 requests can write/delete OpenSearch documents.
     """
     logger.info("[4/4] Deploying lambda-s3-event-manager (S3 docs/ PDF delete)")
 
     role_arn = _ensure_lambda_s3_event_role(s3_bucket_name, opensearch_domain_arn)
+
+    if opensearch_master_password:
+        ensure_opensearch_backend_role_mappings(
+            opensearch_endpoint,
+            opensearch_master_password,
+            [_normalize_iam_arn_for_backend_role(role_arn)],
+        )
+
     lambda_arn = _deploy_lambda_s3_event_manager(
         role_arn, s3_bucket_name, opensearch_endpoint
     )
@@ -1419,12 +1711,37 @@ def main():
         opensearch_info = create_managed_opensearch_domain(opensearch_master_password)
         logger.info("Managed OpenSearch domain created")
 
+        # Verify admin auth against the live cluster; offer retry + AWS-side
+        # password reset on 401 so the installer can recover without manual
+        # intervention in the AWS console.
+        if opensearch_master_password:
+            opensearch_master_password = ensure_opensearch_master_password_works(
+                opensearch_info["endpoint"],
+                opensearch_info["domain_name"],
+                opensearch_master_password,
+            )
+
+        # Map the IAM caller (this installer + local app via SigV4) as a
+        # backend_role on `all_access` so subsequent OpenSearch calls aren't
+        # rejected with 403 by the FGAC security plugin.
+        if opensearch_master_password:
+            ensure_opensearch_backend_role_mappings(
+                opensearch_info["endpoint"],
+                opensearch_master_password,
+                [_get_caller_backend_role_arn()],
+            )
+
         nori_ready = ensure_analysis_nori_plugin(
             opensearch_info["domain_name"],
             engine_version=opensearch_info.get("engine_version"),
             endpoint_url=opensearch_info["endpoint"],
+            master_password=opensearch_master_password,
         )
-        ensure_opensearch_index(opensearch_info["endpoint"], use_nori=nori_ready)
+        ensure_opensearch_index(
+            opensearch_info["endpoint"],
+            use_nori=nori_ready,
+            master_password=opensearch_master_password,
+        )
         logger.info("OpenSearch index created")
 
         # 3. Create CloudFront distribution
@@ -1436,6 +1753,7 @@ def main():
             s3_bucket_name,
             opensearch_info["endpoint"],
             opensearch_info["arn"],
+            opensearch_master_password=opensearch_master_password,
         )
         logger.info("lambda-s3-event-manager deployed")
         
