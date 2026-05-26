@@ -203,7 +203,13 @@ with st.sidebar:
     
     elif mode=='RAG':
         st.subheader("📋 문서/이미지 업로드")
-        uploaded_file = st.file_uploader("RAG를 위한 파일을 선택합니다.", type=["pdf"], key=chat.fileId)
+        if "rag_uploader_key" not in st.session_state:
+            st.session_state.rag_uploader_key = f"{chat.fileId}_0"
+        uploaded_file = st.file_uploader(
+            "RAG를 위한 파일을 선택합니다.",
+            type=["pdf"],
+            key=st.session_state.rag_uploader_key,
+        )
         
     chat.update(modelName, debugMode, skillMode)    
 
@@ -220,6 +226,16 @@ if clear_button==True:
     chat.checkpointers = dict() 
     chat.memorystores = dict() 
     chat.initiate()
+
+    # 업로더 위젯 초기화 (key를 바꾸면 선택된 파일이 비워짐)
+    st.session_state.processed_files = {}
+    base_key = st.session_state.get("rag_uploader_key", f"{chat.fileId}_0")
+    try:
+        prefix, idx = base_key.rsplit("_", 1)
+        next_idx = int(idx) + 1
+    except (ValueError, AttributeError):
+        prefix, next_idx = chat.fileId, 1
+    st.session_state.rag_uploader_key = f"{prefix}_{next_idx}"
 
 # Preview the uploaded image in the sidebar
 file_name = ""
@@ -243,21 +259,34 @@ if uploaded_file is not None and clear_button==False:
         logger.info(f"csv type? {uploaded_file.name.lower().endswith(('.csv'))}")
 
     if uploaded_file and uploaded_file.name and not mode == '이미지 분석':
-        chat.initiate()
+        if "processed_files" not in st.session_state:
+            st.session_state.processed_files = {}
 
-        if debugMode=='Enable':
-            status = '선택한 파일을 업로드합니다.'
-            logger.info(f"status: {status}")
-            st.info(status)
+        file_key = f"{uploaded_file.name}_{uploaded_file.size}"
 
-        file_name = uploaded_file.name
-        logger.info(f"uploading... file_name: {file_name}")
-        file_url = chat.upload_to_s3(uploaded_file.getvalue(), file_name)
-        logger.info(f"file_url: {file_url}")
+        if file_key in st.session_state.processed_files:
+            logger.info(f"already processed, skip sync: {file_key}")
+            cached_body = st.session_state.processed_files[file_key]
+            if cached_body:
+                st.success(f"'{uploaded_file.name}' 은(는) 이미 동기화되었습니다.")
+                st.write(cached_body)
+        else:
+            chat.initiate()
 
-        body = multimodal.sync_data_source(file_url)  # sync uploaded files
-            
-        st.write(body)
+            if debugMode=='Enable':
+                status = '선택한 파일을 업로드합니다.'
+                logger.info(f"status: {status}")
+                st.info(status)
+
+            file_name = uploaded_file.name
+            logger.info(f"uploading... file_name: {file_name}")
+            file_url = chat.upload_to_s3(uploaded_file.getvalue(), file_name)
+            logger.info(f"file_url: {file_url}")
+
+            body = multimodal.sync_data_source(file_url)  # sync uploaded files
+
+            st.write(body)
+            st.session_state.processed_files[file_key] = body
 
     if uploaded_file and clear_button==False and mode == '이미지 분석':
         st.image(uploaded_file, caption="이미지 미리보기", use_container_width=True)
