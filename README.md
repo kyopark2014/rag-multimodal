@@ -31,6 +31,104 @@
 5. S3에서 PDF 삭제 시 **Lambda**가 metadata의 `ids`로 OpenSearch 문서 정리
 
 
+### Operation Architecture
+
+```mermaid
+flowchart TB
+  subgraph UI["Streamlit (application/app.py)"]
+    UP[PDF / 파일 업로드]
+    MODE[모드 선택]
+    SKUI[Skill / MCP 선택]
+    CHAT[채팅 입력]
+  end
+
+  subgraph Indexing["문서 인덱싱 (multimodal.py)"]
+    SYNC[sync_data_source]
+    P2I[pdf_to_images]
+    I2T[img2text]
+    AOS[add_to_opensearch]
+  end
+
+  subgraph LLM["Amazon Bedrock"]
+    BR[ChatBedrock / invoke_model]
+    EMB[Embeddings]
+  end
+
+  subgraph Skills["Agent Skills (skill.py)"]
+    SRC["skills/*/SKILL.md"]
+    BSP[build_skill_prompt]
+    GSI[get_skill_instructions]
+  end
+
+  subgraph LG["LangGraph Agent (langgraph_agent.py)"]
+    RLA[run_langgraph_agent]
+    CA[create_agent]
+    SG["StateGraph: agent ↔ ToolNode"]
+    BT["Built-in: execute_code, read/write_file, bash, upload_file_to_s3, get_current_time"]
+    MC[MultiServerMCPClient]
+  end
+
+  subgraph MCPServers["MCP Servers (mcp_config.py)"]
+    OS[mcp_server_opensearch → retrieve]
+    TE[mcp_server_text_extraction]
+    AWS[aws_documentation]
+    WF[web_fetch]
+  end
+
+  subgraph Search["RAG 검색 (mcp_rag_opensearch.py)"]
+    VEC[k-NN vector search]
+    LEX[lexical hybrid search]
+    GRD[grade_documents]
+  end
+
+  subgraph Storage["Storage"]
+    ART[artifacts/]
+    S3[(S3: docs/, metadata/)]
+    OSDB[(Managed OpenSearch)]
+  end
+
+  UP -->|upload_to_s3| S3
+  UP --> SYNC
+  SYNC --> P2I --> I2T --> AOS
+  I2T --> BR
+  AOS --> EMB
+  AOS --> OSDB
+  AOS --> S3
+
+  MODE -->|Agent / Agent Chat| RLA
+  CHAT --> RLA
+  SKUI -->|skill_list| BSP
+
+  RLA --> CA
+  CA --> SG
+  CA --> MC
+  SG --> BR
+  SG --> BT
+  CA --> GSI
+  BSP -->|system_prompt| SG
+  GSI --> SRC
+  MC --> MCPServers
+  OS --> VEC
+  OS --> LEX
+  VEC --> GRD
+  LEX --> GRD
+  GRD --> BR
+  OSDB --> VEC
+  OSDB --> LEX
+  BT --> ART
+  BT --> S3
+```
+
+| 모드 | 모듈 | 설명 |
+|------|------|------|
+| 일상적인 대화 | `chat.general_conversation` | 대화 이력 + Bedrock Runtime `invoke_model_with_response_stream` 스트리밍 |
+| RAG | `chat.run_rag_with_knowledge_base` | Bedrock Knowledge Base 검색(`retrieve`) 후 Bedrock Runtime으로 답변 생성 |
+| **Agent** | `langgraph_agent.run_langgraph_agent` | LangGraph + MCP + Skills (대화 히스토리 off) |
+| **Agent (Chat)** | `langgraph_agent.run_langgraph_agent` | LangGraph + MCP + Skills (대화 히스토리 on, `history_mode=Enable`) |
+| 이미지 분석 | `chat.summarize_image` | ChatBedrock 멀티모달 (이미지 + 텍스트) 분석, 결과를 `artifacts/` 및 S3에 저장 |
+| 번역하기 | `chat.translate_text` | 한국어↔영어 번역 |
+
+
 
 ## Managed vs Serverless OpenSearch
 
