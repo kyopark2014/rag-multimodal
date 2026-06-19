@@ -26,6 +26,9 @@ from requests_aws4auth import AWS4Auth
 # Configuration
 project_name = "rag-multimodal" # at least 3 characters
 region = "us-west-2"
+AGENTCORE_GATEWAY_REGION = "us-east-1"
+AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
+AGENTCORE_WEBSEARCH_TARGET_NAME = "websearch"
 cloudfront_comment = "CloudFront-for-rag-project"
 
 sts_client = boto3.client("sts", region_name=region)
@@ -39,6 +42,10 @@ es_client = boto3.client("es", region_name=region)
 opensearch_client = boto3.client("opensearch", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
 lambda_client = boto3.client("lambda", region_name=region)
+agentcore_control_client = boto3.client(
+    "bedrock-agentcore-control",
+    region_name=AGENTCORE_GATEWAY_REGION,
+)
 
 # OpenSearch managed domain (used by application/opensearch.py as managed_opensearch_url)
 opensearch_domain_name = project_name
@@ -1225,6 +1232,247 @@ def create_secrets() -> Dict[str, str]:
     return secret_arns
 
 
+def _agentcore_websearch_tool_arn() -> str:
+    return (
+        f"arn:aws:bedrock-agentcore:{AGENTCORE_GATEWAY_REGION}:"
+        f"aws:tool/web-search.v1"
+    )
+
+
+def _list_all_agentcore_gateways() -> List[Dict]:
+    gateways: List[Dict] = []
+    next_token = None
+    while True:
+        kwargs = {}
+        if next_token:
+            kwargs["nextToken"] = next_token
+        response = agentcore_control_client.list_gateways(**kwargs)
+        gateways.extend(response.get("items", []))
+        next_token = response.get("nextToken")
+        if not next_token:
+            break
+    return gateways
+
+
+def _list_all_agentcore_gateway_targets(gateway_id: str) -> List[Dict]:
+    targets: List[Dict] = []
+    next_token = None
+    while True:
+        kwargs = {"gatewayIdentifier": gateway_id}
+        if next_token:
+            kwargs["nextToken"] = next_token
+        response = agentcore_control_client.list_gateway_targets(**kwargs)
+        targets.extend(response.get("items", []))
+        next_token = response.get("nextToken")
+        if not next_token:
+            break
+    return targets
+
+
+def wait_for_agentcore_gateway_ready(gateway_id: str, timeout_seconds: int = 600) -> Dict:
+    """Wait until an AgentCore gateway reaches READY status."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        gateway = agentcore_control_client.get_gateway(gatewayIdentifier=gateway_id)
+        status = gateway.get("status", "")
+        if status == "READY":
+            logger.info(f"  AgentCore gateway is ready: {gateway_id}")
+            return gateway
+        if status in ("FAILED", "DELETING", "DELETE_UNSUCCESSFUL", "UPDATE_UNSUCCESSFUL"):
+            raise RuntimeError(
+                f"AgentCore gateway {gateway_id} entered terminal status: {status}"
+            )
+        logger.info(f"  Waiting for AgentCore gateway ({gateway_id}) status: {status}")
+        time.sleep(10)
+    raise TimeoutError(f"Timed out waiting for AgentCore gateway {gateway_id} to become READY")
+
+
+def create_agentcore_websearch_gateway_role() -> str:
+    """Create IAM service role for the AgentCore Web Search gateway."""
+    logger.info("Creating AgentCore Web Search gateway IAM role")
+    role_name = f"role-agentcore-gateway-websearch-for-{project_name}"
+    role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
+
+    assume_role_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "GatewayAssumeRolePolicy",
+                "Effect": "Allow",
+                "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {"aws:SourceAccount": account_id},
+                    "ArnLike": {
+                        "aws:SourceArn": (
+                            f"arn:aws:bedrock-agentcore:{AGENTCORE_GATEWAY_REGION}:"
+                            f"{account_id}:gateway/{AGENTCORE_WEBSEARCH_GATEWAY_NAME}-*"
+                        )
+                    },
+                },
+            }
+        ],
+    }
+
+    try:
+        iam_client.get_role(RoleName=role_name)
+        logger.info(f"  ✓ IAM role already exists: {role_name}")
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchEntity":
+            raise
+        iam_client.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(assume_role_policy),
+            Description=f"AgentCore Web Search gateway role for {project_name}",
+        )
+        logger.info(f"  ✓ Created IAM role: {role_name}")
+        time.sleep(10)
+
+    gateway_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "InvokeGateway",
+                "Effect": "Allow",
+                "Action": ["bedrock-agentcore:InvokeGateway"],
+                "Resource": [
+                    (
+                        f"arn:aws:bedrock-agentcore:{AGENTCORE_GATEWAY_REGION}:"
+                        f"{account_id}:gateway/*"
+                    )
+                ],
+            },
+            {
+                "Sid": "InvokeWebSearchTool",
+                "Effect": "Allow",
+                "Action": ["bedrock-agentcore:InvokeWebSearch"],
+                "Resource": [_agentcore_websearch_tool_arn()],
+            },
+        ],
+    }
+    iam_client.put_role_policy(
+        RoleName=role_name,
+        PolicyName=f"agentcore-gateway-websearch-policy-for-{project_name}",
+        PolicyDocument=json.dumps(gateway_policy),
+    )
+    logger.info(f"  ✓ Updated inline policy on gateway role: {role_name}")
+    return role_arn
+
+
+def _ensure_websearch_gateway_target(gateway_id: str) -> str:
+    """Create the managed web-search connector target if it does not exist."""
+    for target in _list_all_agentcore_gateway_targets(gateway_id):
+        if target.get("name") == AGENTCORE_WEBSEARCH_TARGET_NAME:
+            target_id = target["targetId"]
+            logger.warning(
+                f"  AgentCore websearch target already exists: {target_id}"
+            )
+            return target_id
+
+    logger.info("  Creating AgentCore websearch gateway target")
+    response = agentcore_control_client.create_gateway_target(
+        gatewayIdentifier=gateway_id,
+        name=AGENTCORE_WEBSEARCH_TARGET_NAME,
+        description=f"Managed Web Search connector for {project_name}",
+        targetConfiguration={
+            "mcp": {
+                "connector": {
+                    "source": {
+                        "connectorId": "web-search",
+                    },
+                    "configurations": [
+                        {
+                            "name": "WebSearch",
+                            "parameterValues": {},
+                        }
+                    ],
+                }
+            }
+        },
+        credentialProviderConfigurations=[
+            {"credentialProviderType": "GATEWAY_IAM_ROLE"}
+        ],
+    )
+    target_id = response["targetId"]
+    logger.info(f"  ✓ AgentCore websearch target created: {target_id}")
+
+    try:
+        agentcore_control_client.synchronize_gateway_targets(
+            gatewayIdentifier=gateway_id,
+            targetIdList=[target_id],
+        )
+    except ClientError as e:
+        logger.warning(f"  Could not synchronize gateway target immediately: {e}")
+
+    return target_id
+
+
+def get_or_create_agentcore_websearch_gateway(gateway_service_role_arn: str) -> Dict[str, str]:
+    """Create gateway-websearch with the managed web-search connector in us-east-1."""
+    logger.info("Creating AgentCore Web Search gateway")
+
+    gateway_id = None
+    for gateway in _list_all_agentcore_gateways():
+        if gateway.get("name") == AGENTCORE_WEBSEARCH_GATEWAY_NAME:
+            gateway_id = gateway["gatewayId"]
+            logger.warning(
+                f"  AgentCore gateway already exists: "
+                f"{AGENTCORE_WEBSEARCH_GATEWAY_NAME} ({gateway_id})"
+            )
+            break
+
+    if not gateway_id:
+        response = agentcore_control_client.create_gateway(
+            name=AGENTCORE_WEBSEARCH_GATEWAY_NAME,
+            description=f"AgentCore Web Search gateway for {project_name}",
+            roleArn=gateway_service_role_arn,
+            protocolType="MCP",
+            authorizerType="AWS_IAM",
+            tags={"project": project_name},
+        )
+        gateway_id = response["gatewayId"]
+        logger.info(f"  ✓ AgentCore gateway created: {gateway_id}")
+        wait_for_agentcore_gateway_ready(gateway_id)
+
+    gateway = wait_for_agentcore_gateway_ready(gateway_id)
+    target_id = _ensure_websearch_gateway_target(gateway_id)
+    gateway_url = gateway.get("gatewayUrl", "").rstrip("/")
+
+    return {
+        "gateway_id": gateway_id,
+        "gateway_name": AGENTCORE_WEBSEARCH_GATEWAY_NAME,
+        "gateway_region": AGENTCORE_GATEWAY_REGION,
+        "gateway_url": gateway_url,
+        "gateway_arn": gateway.get("gatewayArn", ""),
+        "gateway_service_role_arn": gateway_service_role_arn,
+        "target_id": target_id,
+    }
+
+
+def _apply_websearch_gateway_config(
+    config_data: Dict[str, str],
+    agentcore_websearch_gateway_info: Optional[Dict[str, str]] = None,
+) -> None:
+    """Add AgentCore websearch gateway settings to config.json payload."""
+    if not agentcore_websearch_gateway_info:
+        return
+    config_data["agentcore_websearch_gateway_name"] = agentcore_websearch_gateway_info.get(
+        "gateway_name", AGENTCORE_WEBSEARCH_GATEWAY_NAME
+    )
+    config_data["agentcore_websearch_gateway_region"] = agentcore_websearch_gateway_info.get(
+        "gateway_region", AGENTCORE_GATEWAY_REGION
+    )
+    config_data["agentcore_websearch_gateway_id"] = agentcore_websearch_gateway_info.get(
+        "gateway_id", ""
+    )
+    config_data["agentcore_websearch_gateway_url"] = agentcore_websearch_gateway_info.get(
+        "gateway_url", ""
+    )
+    config_data["agentcore_websearch_gateway_role"] = agentcore_websearch_gateway_info.get(
+        "gateway_service_role_arn", ""
+    )
+
+
 def create_cloudfront_distribution(s3_bucket_name: str) -> Dict[str, str]:
     """Create CloudFront distribution with S3 origin."""
     logger.info("[3/3] Creating CloudFront distribution (S3)")
@@ -1696,6 +1944,7 @@ def main():
     logger.info("="*60)
     
     start_time = time.time()
+    agentcore_websearch_gateway_info = None
     
     try:
         # 1. Create secrets
@@ -1705,6 +1954,12 @@ def main():
         # 1. Create S3 bucket
         s3_bucket_name = create_s3_bucket()
         logger.info("S3 bucket created")
+
+        agentcore_websearch_gateway_role_arn = create_agentcore_websearch_gateway_role()
+        agentcore_websearch_gateway_info = get_or_create_agentcore_websearch_gateway(
+            agentcore_websearch_gateway_role_arn
+        )
+        logger.info("AgentCore Web Search gateway ready")
 
         # 2. Create managed OpenSearch domain (application/opensearch.py)
         opensearch_master_password = prompt_opensearch_master_password_if_needed()
@@ -1774,6 +2029,20 @@ def main():
         logger.info(f"  CloudFront Domain: https://{cloudfront_info['domain']}")
         logger.info(f"  Lambda (S3 docs/): {lambda_s3_event_info['function_arn']}")
         logger.info(f"  S3 event prefix: {lambda_s3_event_info['s3_docs_prefix']}")
+        if agentcore_websearch_gateway_info:
+            logger.info(
+                f"  AgentCore Web Search Gateway: "
+                f"{agentcore_websearch_gateway_info.get('gateway_name')} "
+                f"({agentcore_websearch_gateway_info.get('gateway_id')})"
+            )
+            logger.info(
+                f"  AgentCore Web Search Gateway URL: "
+                f"{agentcore_websearch_gateway_info.get('gateway_url')}"
+            )
+            logger.info(
+                f"  AgentCore Web Search Gateway Role: "
+                f"{agentcore_websearch_gateway_info.get('gateway_service_role_arn')}"
+            )
         logger.info("")
         logger.info(f"Total deployment time: {elapsed_time/60:.2f} minutes")
         logger.info("="*60)
@@ -1809,6 +2078,7 @@ def main():
             "lambda_s3_event_manager_arn": lambda_s3_event_info["function_arn"],
             "lambda_s3_event_manager_name": lambda_s3_event_info["function_name"],
         })
+        _apply_websearch_gateway_config(config_data, agentcore_websearch_gateway_info)
         config_data.pop("lambda_s3_event_sqs_fifo_urls", None)
         if opensearch_master_password:
             config_data["managed_opensearch_dashboards_password"] = (
