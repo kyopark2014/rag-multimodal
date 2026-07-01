@@ -34,7 +34,7 @@ region = config.get("region", "us-west-2")
 enableHybridSearch = "Enable"
 enableGrading = "Enable"
 multi_region = "Disable"
-grading_model_name = "Claude 4.5 Sonnet"
+grading_model_name = "Claude 5.0 Sonnet"
 
 index_name = projectName
 number_of_results = 5
