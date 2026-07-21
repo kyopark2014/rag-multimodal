@@ -1,0 +1,10 @@
+{
+  "MCP": [
+    "opensearch",
+    "websearch"
+  ],
+  "SKILL": [
+    "skill-creator",
+    "graphify"
+  ]
+}
