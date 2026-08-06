@@ -949,7 +949,7 @@ def buildChatAgent(tools):
 
 
 def buildChatAgentWithPlan(tools):
-    tool_node = ToolNode(tools)
+    tool_node = ToolNode(tools, handle_tool_errors=True)
 
     workflow = StateGraph(State)
 
