@@ -5,6 +5,8 @@ import json
 import re
 import uuid
 import base64
+import asyncio
+import threading
 import info 
 import utils
 import bedrock_data_retention
@@ -92,27 +94,46 @@ contextual_embedding = "Enable"
 user_id = "agent"
 multi_region = 'Disable'
 
-def update(modelName, debugMode, skillMode):    
+def update(
+    modelName=None,
+    debugMode=None,
+    skillMode=None,
+    memoryMode=None,
+    userId=None,
+    guardrailEnabled=None,
+    llmGatewayEnabled=None,
+    memoryEnabled=None,
+    reasoningMode=None,
+):
+    """Update session knobs. Accepts Streamlit-style and FastAPI-style kwargs."""
     global model_name, model_id, model_type, debug_mode
     global models, user_id, skill_mode
 
-    if model_name != modelName:
+    if userId is not None:
+        normalized = str(userId).strip()
+        if normalized and user_id != normalized:
+            user_id = normalized
+            logger.info(f"user_id: {user_id}")
+        elif normalized:
+            user_id = normalized
+
+    if modelName is not None and model_name != modelName:
         model_name = modelName
         logger.info(f"model_name: {model_name}")
-        
         models = info.get_model_info(model_name)
         model_id = models[0]["model_id"]
         model_type = models[0]["model_type"]
-                                
-    if debug_mode != debugMode:
-        debug_mode = debugMode        
+
+    if debugMode is not None and debug_mode != debugMode:
+        debug_mode = debugMode
         logger.info(f"debug_mode: {debug_mode}")
 
-    if skill_mode != skillMode:
+    if skillMode is not None and skill_mode != skillMode:
         skill_mode = skillMode
         logger.info(f"skill_mode: {skill_mode}")
 
-    # logger.info(f"mcp.env updated: {mcp_env}")
+    # Accepted for API compatibility.
+    _ = memoryMode, memoryEnabled, guardrailEnabled, llmGatewayEnabled, reasoningMode
 
 map_chain = dict() 
 checkpointers = dict() 
@@ -1663,3 +1684,79 @@ def get_tool_info(tool_name, tool_content):
             pass
 
     return content, urls, tool_references
+
+
+_agent_loop = None
+_agent_loop_lock = threading.Lock()
+
+
+def _get_agent_loop():
+    global _agent_loop
+    with _agent_loop_lock:
+        if _agent_loop is None or _agent_loop.is_closed():
+            _agent_loop = asyncio.new_event_loop()
+
+            def _runner(loop):
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+
+            t = threading.Thread(
+                target=_runner, args=(_agent_loop,), daemon=True, name="rag-multimodal-agent-loop"
+            )
+            t.start()
+        return _agent_loop
+
+
+def _run_on_agent_loop(coro):
+    loop = _get_agent_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
+
+
+def run_agent(
+    prompt,
+    user_id,
+    mcp_servers,
+    model_name,
+    runtime_session_id,
+    notification_queue=None,
+    skill_list=None,
+    guardrail_enabled=None,
+    llm_gateway_enabled=None,
+    memory_enabled=None,
+    files=None,
+):
+    """Sync entry used by FastAPI routes: update session then run LangGraph."""
+    import langgraph_agent
+
+    update(
+        userId=user_id,
+        modelName=model_name,
+        debugMode="Enable",
+        skillMode="Enable",
+        memoryMode="Enable" if memory_enabled else "Disable",
+        memoryEnabled=memory_enabled,
+        guardrailEnabled=guardrail_enabled,
+        llmGatewayEnabled=llm_gateway_enabled,
+    )
+
+    if notification_queue is not None:
+        notification_queue.reset()
+
+    query = prompt or ""
+    file_urls = [u for u in (files or []) if u]
+    if file_urls:
+        query = (query + "\n\n" if query else "") + "Attached files:\n" + "\n".join(file_urls)
+
+    history_mode = "Enable" if memory_enabled else "Disable"
+    _ = runtime_session_id
+    return _run_on_agent_loop(
+        langgraph_agent.run_langgraph_agent(
+            query=query,
+            mcp_servers=mcp_servers or [],
+            skill_list=skill_list or [],
+            history_mode=history_mode,
+            notification_queue=notification_queue,
+            user_id=user_id,
+        )
+    )

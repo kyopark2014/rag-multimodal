@@ -6,8 +6,8 @@
 | --- | --- |
 | **대상 문서** | 일반 OCR로 깨지기 쉬운 표·차트·레이아웃이 있는 PDF |
 | **인덱싱** | 페이지 → PNG → Bedrock 멀티모달 OCR → parent/child 청크 → OpenSearch (k-NN + lexical) |
-| **질의 응답** | Streamlit **Agent** 모드 + **opensearch** MCP, 관련도 grading 후 답변 |
-| **UI** | [Streamlit](https://streamlit.io/) (`application/app.py`) |
+| **질의 응답** | React **Agent** UI + **opensearch** MCP, 관련도 grading 후 답변 |
+| **UI** | FastAPI + React (`application/server.py`, `application/web/`) |
 | **인프라** | S3, Managed OpenSearch, CloudFront, Lambda(S3 삭제 시 벡터 정리) — [`installer.py`](./installer.py)로 배포 |
 
 **관련 예제:** [paddle-ocr](https://github.com/kyopark2014/paddle-ocr) · [multimodal-ocr](https://github.com/kyopark2014/multimodal-ocr)
@@ -16,7 +16,7 @@
 
 여기에서는 Knowledge Base로 처리하기 어려운 복잡한 RAG 문제를 Multimodal LLM이 직접 파싱하는 방법을 설명합니다. 문서에 복잡한 표나 그림이 있는 경우에 [일반적인 OCR 모델](https://github.com/kyopark2014/paddle-ocr)로 문서를 분석하기 어렵습니다. 반면에 [Multimodal을 이용한 OCR](https://github.com/kyopark2014/multimodal-ocr)은 사람의 관점으로 문서를 정리할 수 있어서, AI application에서 표나 그림을 이해하는데 크게 도움이 됩니다. 
 
-파일업로드시 pdf의 경우에 각 page 단위로 이미지를 추출한 후에 OCR을 수행합니다. 이후 하나의 markdown 파일을 생성한 후에 chunking과 embedding후에 OpenSearch에 document를 추가합니다. Amazon S3에 저장된 파일이 삭제될 경우에는 해당 파일의 meta를 확인하여 OpenSearch에서 관련된 Document를 삭제합니다. OpenSearch에 저장되는 문서의 원할한 검색을 위해 metadata에 파일경로(url), 페이지 번호, 생성일, 생성자와 같은 정보를 추가하여 검색의 정확도를 높일 수 있습니다. 여기서는 데모 application을 위해 Streamlit을 이용합니다. Streamlit의 LangGraph agent는 OpenSearch를 검색하는 MCP를 이용하여 관련된 문서를 검색합니다. 이때, hybrid search를 이용해 vector와 lexical로 검색한 결과를 추출하고 관련도를 grading하여 관련도가 높은 문서를 context에 포함하여 적절한 답변을 생성합니다. 
+파일업로드시 pdf의 경우에 각 page 단위로 이미지를 추출한 후에 OCR을 수행합니다. 이후 하나의 markdown 파일을 생성한 후에 chunking과 embedding후에 OpenSearch에 document를 추가합니다. Amazon S3에 저장된 파일이 삭제될 경우에는 해당 파일의 meta를 확인하여 OpenSearch에서 관련된 Document를 삭제합니다. OpenSearch에 저장되는 문서의 원할한 검색을 위해 metadata에 파일경로(url), 페이지 번호, 생성일, 생성자와 같은 정보를 추가하여 검색의 정확도를 높일 수 있습니다. 여기서는 데모 application을 위해 **FastAPI + React** UI를 이용합니다. LangGraph agent는 OpenSearch를 검색하는 MCP를 이용하여 관련된 문서를 검색합니다. 이때, hybrid search를 이용해 vector와 lexical로 검색한 결과를 추출하고 관련도를 grading하여 관련도가 높은 문서를 context에 포함하여 적절한 답변을 생성합니다. 
 
 전체 아키텍처는 아래와 같습니다. 개발 환경은 **로컬 PC** 기준입니다.
 
@@ -24,7 +24,7 @@
 <img width="900" alt="image" src="https://github.com/user-attachments/assets/f76f3457-764d-416c-911f-c7081b29510d" />
 
 
-1. Streamlit에서 PDF 업로드 → **S3** `docs/` 저장 (원본 참조용 **CloudFront** URL)
+1. React UI에서 PDF 업로드 → **S3** `docs/` 저장 (원본 참조용 **CloudFront** URL)
 2. [`multimodal.py`](./application/multimodal.py)가 페이지별 이미지 추출 → 멀티모달 LLM으로 **Markdown** 생성
 3. 청킹·임베딩 후 **OpenSearch** 적재, 벡터 `id`는 S3 `metadata/*.metadata.json`에 저장
 4. **Agent** 질의 시 opensearch MCP로 하이브리드 검색 → grading → 답변 context 구성
@@ -35,11 +35,10 @@
 
 ```mermaid
 flowchart TB
-  subgraph UI["Streamlit (application/app.py)"]
-    UP[PDF / 파일 업로드]
-    MODE[모드 선택]
+  subgraph UI["React SPA + FastAPI (server.py)"]
+    UP[PDF / RAG Upload]
     SKUI[Skill / MCP 선택]
-    CHAT[채팅 입력]
+    CHAT[Agent Chat SSE]
   end
 
   subgraph Indexing["문서 인덱싱 (multimodal.py)"]
@@ -95,7 +94,6 @@ flowchart TB
   AOS --> OSDB
   AOS --> S3
 
-  MODE -->|Agent / Agent Chat| RLA
   CHAT --> RLA
   SKUI -->|skill_list| BSP
 
@@ -121,12 +119,8 @@ flowchart TB
 
 | 모드 | 모듈 | 설명 |
 |------|------|------|
-| 일상적인 대화 | `chat.general_conversation` | 대화 이력 + Bedrock Runtime `invoke_model_with_response_stream` 스트리밍 |
-| RAG | `chat.run_rag_with_knowledge_base` | Bedrock Knowledge Base 검색(`retrieve`) 후 Bedrock Runtime으로 답변 생성 |
 | **Agent** | `langgraph_agent.run_langgraph_agent` | LangGraph + MCP + Skills (대화 히스토리 off) |
 | **Agent (Chat)** | `langgraph_agent.run_langgraph_agent` | LangGraph + MCP + Skills (대화 히스토리 on, `history_mode=Enable`) |
-| 이미지 분석 | `chat.summarize_image` | ChatBedrock 멀티모달 (이미지 + 텍스트) 분석, 결과를 `artifacts/` 및 S3에 저장 |
-| 번역하기 | `chat.translate_text` | 한국어↔영어 번역 |
 
 
 
@@ -162,7 +156,7 @@ RAG의 성능을 높이기 위해 이 프로젝트에 적용한 advanced RAG 기
 
 ### OCR
 
-PDF를 페이지별 PNG로 렌더링한 뒤 멀티모달 LLM으로 Markdown을 추출하고, OpenSearch에 parent/child 청크로 적재합니다. 업로드 시 [`application/app.py`](./application/app.py)에서 `multimodal.sync_data_source()`를 호출하며, 내부 흐름은 `pdf_to_images` → `img2text` → `add_to_opensearch` 입니다.
+PDF를 페이지별 PNG로 렌더링한 뒤 멀티모달 LLM으로 Markdown을 추출하고, OpenSearch에 parent/child 청크로 적재합니다. 업로드 시 [`application/services/rag_service.py`](./application/services/rag_service.py)에서 `multimodal.sync_data_source()`를 호출하며, 내부 흐름은 `pdf_to_images` → `img2text` → `add_to_opensearch` 입니다.
 
 Contextual embedding은 `chat.contextual_embedding`이 `'Enable'`일 때 parent/child 청크에 문서 전체 맥락을 붙입니다. 인덱스·검색용 OpenSearch 클라이언트와 벡터스토어는 아래와 같습니다.
 
@@ -304,7 +298,7 @@ for i, doc in enumerate(parent_docs):
 
 ### 동기화
 
-[app.py](./application/app.py)와 같이 streamlit에서 파일을 업로드 하면 아래와 같이 Amazon S3에 파일을 업로드하고, [multimodal.py](./application/multimodal.py)의 sync_data_source를 이용해 RAG로 활용됩니다.
+React UI(`/api/rag/upload`)에서 파일을 업로드하면 아래와 같이 Amazon S3에 파일을 업로드하고, [multimodal.py](./application/multimodal.py)의 sync_data_source를 이용해 RAG로 활용됩니다.
 
 
 ```python
@@ -357,7 +351,7 @@ def img2text(images: list[str], filename: Optional[str] = None) -> list[str]:
     return extracted_text        
 ```
 
-Streamlit에서 업로드한 PDF는 S3 `docs/`에 저장됩니다. 사용자가 S3에서 PDF를 삭제하면 **버킷 알림**이 `lambda-s3-event-manager` Lambda를 호출하고, 업로드 시 저장한 `metadata/*.metadata.json`의 `ids`로 OpenSearch 벡터를 정리합니다. 상세 배포는 [installer.md](./installer.md) §4, `python3 installer.py`의 `deploy_lambda_s3_event_manager()`를 참고하세요.
+React UI에서 업로드한 PDF는 S3 `docs/`에 저장됩니다. 사용자가 S3에서 PDF를 삭제하면 **버킷 알림**이 `lambda-s3-event-manager` Lambda를 호출하고, 업로드 시 저장한 `metadata/*.metadata.json`의 `ids`로 OpenSearch 벡터를 정리합니다. 상세 배포는 [installer.md](./installer.md) §4, `python3 installer.py`의 `deploy_lambda_s3_event_manager()`를 참고하세요.
 
 | 구성 | 내용 |
 |------|------|
@@ -397,11 +391,15 @@ rag-multimodal/
 ├── README.md
 ├── LICENSE
 ├── requirements.txt              # 루트 Python 의존성
+├── run_local.sh                  # React 빌드 + uvicorn :8501
 ├── installer.py                  # S3·OpenSearch·CloudFront·Lambda 배포
 ├── installer.md                  # 인프라 배포 상세 가이드
 ├── uninstaller.py                # 배포된 AWS 리소스 삭제
 ├── application/
-│   ├── app.py                    # Streamlit UI (업로드·채팅·에이전트)
+│   ├── server.py                 # FastAPI 진입점 + React SPA 서빙
+│   ├── api/                      # REST/SSE 라우터
+│   ├── services/rag_service.py   # PDF 업로드 → multimodal OCR → OpenSearch
+│   ├── web/                      # React (Vite) UI
 │   ├── chat.py                   # Bedrock 채팅, contextual embedding, S3 업로드
 │   ├── multimodal.py             # PDF → 이미지 → Markdown → OpenSearch 인덱싱
 │   ├── mcp_rag_opensearch.py     # OpenSearch 하이브리드 검색 (Agent MCP)
@@ -409,7 +407,7 @@ rag-multimodal/
 │   ├── mcp_server_text_extraction.py  # 이미지→텍스트 추출 MCP
 │   ├── mcp_config.py             # MCP 서버 설정
 │   ├── langgraph_agent.py        # LangGraph 에이전트
-│   ├── notification_queue.py     # 알림 큐
+│   ├── notification_queue.py     # SSE용 알림 큐
 │   ├── skill.py                  # Agent 스킬 로딩
 │   ├── utils.py
 │   ├── info.py
@@ -426,7 +424,9 @@ rag-multimodal/
 
 | 경로 | 역할 |
 |------|------|
-| [`application/app.py`](./application/app.py) | 파일 업로드, `multimodal.sync_data_source()` 호출, LangGraph 에이전트 UI |
+| [`application/server.py`](./application/server.py) | FastAPI + React SPA 서빙 |
+| [`application/services/rag_service.py`](./application/services/rag_service.py) | PDF 업로드, `multimodal.sync_data_source()` 호출 |
+| [`application/web/`](./application/web/) | React Agent UI (Skill/MCP/채팅/업로드) |
 | [`application/multimodal.py`](./application/multimodal.py) | 문서 동기화·청킹·임베딩·S3 metadata 저장 |
 | [`application/mcp_rag_opensearch.py`](./application/mcp_rag_opensearch.py) | k-NN + lexical 하이브리드 검색, parent/child reference |
 | [`lambda-s3-event-manager/lambda_function.py`](./lambda-s3-event-manager/lambda_function.py) | `ObjectRemoved` 이벤트 → `metadata.json`의 `ids`로 벡터 삭제 |
@@ -439,8 +439,8 @@ rag-multimodal/
 | --- | --- | --- |
 | 1 | `pip install -r requirements.txt` | 수 분 |
 | 2 | `python3 installer.py` (OpenSearch 도메인 생성 포함) | **약 30~60분** (최초) |
-| 3 | `cd application && streamlit run app.py` | 즉시 |
-| 4 | 사이드바 **Agent** + MCP **opensearch** 선택 → PDF 업로드 → 질문 | 문서·모델에 따라 수 분 |
+| 3 | `./run_local.sh` (또는 `uvicorn application.server:app --port 8501`) | 프론트 빌드 포함 |
+| 4 | UI에서 MCP **opensearch** 선택 → PDF 업로드 → 질문 | 문서·모델에 따라 수 분 |
 
 > OpenSearch 도메인 생성이 끝나기 전에는 인덱싱·검색이 실패할 수 있습니다. installer 로그에서 `[n/m]` 단계 완료와 `application/config.json` 갱신을 확인하세요.
 
@@ -611,40 +611,51 @@ python3 uninstaller.py
 
 ## 애플리케이션 실행
 
-인프라 배포와 `config.json` 생성이 끝난 뒤, **application** 디렉터리에서 Streamlit을 실행합니다.
+인프라 배포와 `config.json` 생성이 끝난 뒤, FastAPI + React UI를 실행합니다.
 
 ```bash
-cd application
-streamlit run app.py
+# 프론트 빌드 후 uvicorn (포트 8501)
+./run_local.sh
 ```
 
-브라우저에서 기본 주소(보통 `http://localhost:8501`)가 열립니다. 사이드바에서 **사용 모델**(Bedrock), **Debug Mode**, 대화 형태를 선택합니다.
+또는 수동으로:
 
-| 대화 형태 | 이 프로젝트에서의 용도 |
+```bash
+cd application/web && npm install && npm run build && cd ../..
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+```
+
+개발 시 HMR:
+
+```bash
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+cd application/web && npm run dev   # http://localhost:5173  (/api → :8501 프록시)
+```
+
+브라우저에서 `http://localhost:8501` 로 접속한 뒤 User ID로 로컬 세션을 시작합니다. 사이드바에서 **모델**, **Skill**, **MCP**(기본 `opensearch`)를 선택합니다.
+
+| 기능 | 이 프로젝트에서의 용도 |
 | --- | --- |
-| **RAG** | PDF 업로드 → `multimodal.sync_data_source()`로 OpenSearch 인덱싱 (이 README 데모의 핵심) |
+| **RAG 업로드** | PDF 업로드 → `multimodal.sync_data_source()`로 OpenSearch 인덱싱 |
 | **Agent** / **Agent (Chat)** | MCP **opensearch**로 인덱싱된 문서 검색·답변 (채팅 이력 유무 차이) |
-| **이미지 분석** | 단일 이미지 멀티모달 분석 (`chat.summary_image`) |
-| **일상적인 대화** / **번역하기** | Bedrock 일반 채팅·번역 (OpenSearch 미사용) |
+| **이미지 첨부** | 채팅에 이미지 URL을 첨부해 멀티모달 분석 |
 
 ## 사용 방법
 
 아래는 [실행 결과](#실행-결과)와 동일한 흐름을 단계별로 정리한 것입니다.
 
-### 1. 문서 인덱싱 (RAG 모드)
+### 1. 문서 인덱싱 (RAG 업로드)
 
-1. 사이드바 **대화 형태**에서 **RAG** 선택
-2. **문서/이미지 업로드**에서 PDF 선택 (예: [`application/contents/global_ship_status.pdf`](./application/contents/global_ship_status.pdf))
-3. 업로드가 완료되면 S3 저장 → 페이지 OCR → OpenSearch 적재가 진행됩니다 (페이지 수·모델에 따라 **수 분** 소요 가능)
-4. 중간 산출물은 `application/artifacts/{문서이름}/`에 PNG·MD로 남을 수 있습니다
+1. UI 사이드바/업로드에서 PDF 선택 (예: [`application/contents/global_ship_status.pdf`](./application/contents/global_ship_status.pdf))
+2. 업로드가 완료되면 S3 저장 → 페이지 OCR → OpenSearch 적재가 진행됩니다 (페이지 수·모델에 따라 **수 분** 소요 가능)
+3. 중간 산출물은 `application/artifacts/{문서이름}/`에 PNG·MD로 남을 수 있습니다
 
-### 2. 질의 응답 (Agent 모드)
+### 2. 질의 응답 (Agent)
 
-1. **대화 형태**를 **Agent** 또는 **Agent (Chat)** 로 변경
-2. **MCP 옵션**에서 **opensearch** 체크
-3. 채팅 입력란에 질문 입력 (예: *「opensearch로 연료별 비중 향후전망을 검토하세요」*)
-4. Agent가 OpenSearch MCP로 검색·grading 후 답변을 생성합니다
-5. **Debug Mode**가 켜져 있으면 참조한 parent 청크를 expander로 확인할 수 있습니다
+1. **MCP 옵션**에서 **opensearch** 체크
+2. 채팅 입력란에 질문 입력 (예: *「opensearch로 연료별 비중 향후전망을 검토하세요」*)
+3. Agent가 OpenSearch MCP로 검색·grading 후 답변을 생성합니다
+4. Debug 스트림이 켜져 있으면 도구 호출·참조 청크를 UI에서 확인할 수 있습니다
 
 ### 3. 문서 삭제 (OpenSearch 정리)
 

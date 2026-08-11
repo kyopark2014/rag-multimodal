@@ -24,7 +24,10 @@ from pytz import timezone
 from langchain_core.tools import tool
 from urllib import parse
 from urllib import parse as url_parse
-from notification_queue import NotificationQueue
+try:
+    from notification_queue import QueueNotificationSink as NotificationQueue
+except ImportError:
+    NotificationQueue = None  # type: ignore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1123,9 +1126,21 @@ async def _prior_tool_call_ids(app, config) -> set:
         return set()
 
 
-async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, history_mode: str="Disable", notification_queue: NotificationQueue =None) -> tuple[str, list]:
+async def run_langgraph_agent(
+    query: str,
+    mcp_servers: list,
+    skill_list: list,
+    history_mode: str = "Disable",
+    notification_queue: NotificationQueue = None,
+    user_id: str | None = None,
+) -> tuple[str, list]:
     global app, config, active_mcp_servers, active_skills, current_id
-    
+
+    session_user_id = (user_id or chat.user_id or "").strip()
+    if session_user_id and chat.user_id != session_user_id:
+        chat.user_id = session_user_id
+        logger.info("Synced chat.user_id for RAG/MCP: %s", session_user_id)
+
     queue = notification_queue if notification_queue else None
     if queue:
         queue.reset()
@@ -1134,10 +1149,15 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
     artifact_paths = []
     references = []
 
-    if app is None or active_mcp_servers != mcp_servers or active_skills != skill_list or current_id != chat.user_id:
+    if (
+        app is None
+        or active_mcp_servers != mcp_servers
+        or active_skills != skill_list
+        or current_id != session_user_id
+    ):
         active_mcp_servers = mcp_servers
         active_skills = skill_list
-        current_id = chat.user_id
+        current_id = session_user_id
 
         app, config = await create_agent(mcp_servers, skill_list, history_mode)
     

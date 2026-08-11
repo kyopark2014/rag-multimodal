@@ -1,19 +1,60 @@
-streamlit
-streamlit-chat
-boto3
+# Web UI (application/)
+fastapi
+python-multipart
+uvicorn[standard]
+
+# AWS
+boto3>=1.43.32
+botocore>=1.43.32
+
+# LangChain / LangGraph
 langchain_aws
 langchain
+langchain_community
 langchain-openai
 openai>=2.41.0
-langchain_community
+langgraph
 langchain-text-splitters
+langchain_experimental
+
+# OpenSearch / multimodal OCR pipeline
 opensearch-py
 requests-aws4auth
-langgraph
-langchain_experimental
+pymupdf
+PyPDF2
+
+# MCP
 mcp
 langchain-mcp-adapters
-requests
+awslabs.aws-documentation-mcp-server
+
+# Runtime / shared utilities
+httpx
 uv
-graphviz
+requests
+aiosqlite
+pyyaml
+Pillow
+pytz
 rich
+numpy
+pandas
+matplotlib==3.10.0
+plotly_express==0.4.1
+beautifulsoup4==4.12.3
+wikipedia
+kaleido
+diagrams
+graphviz
+colorama
+finance-datareader
+python-pptx
+defusedxml
+lxml
+openpyxl
+pytesseract
+markitdown[pptx]
+reportlab
+pypdf
+pdfplumber
+tavily-python

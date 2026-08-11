@@ -217,7 +217,7 @@ Lambda는 `metadata/*.metadata.json`의 `ids`를 읽어 OpenSearch에서 벡터�
 | installer 산출물 | 사용처 |
 |------------------|--------|
 | `managed_opensearch_url` | `multimodal.py`, `mcp_rag_opensearch.py` — 인덱싱·하이브리드 검색 |
-| `s3_bucket`, `s3_docs_prefix` | `app.py`, `multimodal.py`, `chat.py` — 업로드·동기화 |
+| `s3_bucket`, `s3_docs_prefix` | `rag_service.py`, `multimodal.py`, `chat.py` — 업로드·동기화 |
 | `sharing_url` | CloudFront 경유 정적/공유 링크 |
 | Lambda S3 이벤트 | PDF 등 삭제 시 OpenSearch 정리 (`lambda-s3-event-manager`) |
 

@@ -4,7 +4,7 @@
     "websearch"
   ],
   "SKILL": [
-    "skill-creator",
-    "graphify"
+    "pdf2img",
+    "img2text"
   ]
 }
