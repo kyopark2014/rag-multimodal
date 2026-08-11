@@ -663,13 +663,9 @@ cd application/web && npm run dev   # http://localhost:5173  (/api → :8501 프
 
 ## 실행 결과
 
-[application/contents/global_ship_status.pdf](./application/contents/global_ship_status.pdf) 파일을 업로드하여 OpenSearch에 chunked doc을 push합니다. 이후 "opensearch로 연료별 비중 향후전망을 검토하세요"라고 입력합니다. 질문에서 추출한 "연료별 비중 향후전망"을 opensearch MCP를 이용해 검색합니다. 
+"opensearch로 보일러 에러 코드에 대해 조사하세요."라고 입력후 결과를 보면 아래와 같이 retrieve tool을 이용하여 관련된 문서를 조회하고 결과를 얻을 수 있습니다.
 
-<img width="726" height="431" alt="image" src="https://github.com/user-attachments/assets/42c2fabc-2b6b-4c55-9184-56001b6a0c4f" />
-
-최종적으로 아래와 같은 결과를 얻을 수 있습니다. 관련된 **reference**를 열어 관련 페이지와 내용을 확인할 수 있습니다.
-
-<img width="669" height="785" alt="image" src="https://github.com/user-attachments/assets/376351ae-d348-45a3-a1e9-18ba676e7ec8" />
+<img width="918" height="661" alt="image" src="https://github.com/user-attachments/assets/7de00ecd-2da2-47c9-b556-9ca35ca23a82" />
 
 ## 관련 문서
 
