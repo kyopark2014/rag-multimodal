@@ -51,26 +51,28 @@ def _get_os_client() -> OpenSearch:
 
 
 def _object_name_from_key(key: str) -> str:
-    """Derive object name under docs/ (application/lambda_function.py)."""
-    if key.find(s3_prefix) != -1:
-        return key[key.find(s3_prefix) + len(s3_prefix) + 1 :]
+    """Derive relative object path under docs/{project}/ (keeps user_id/)."""
+    prefix = s3_prefix.rstrip("/")
+    if key.startswith(f"{prefix}/"):
+        return key[len(prefix) + 1 :]
+    if key.find(prefix) != -1:
+        return key[key.find(prefix) + len(prefix) + 1 :]
     return key
 
 
 def metadata_key_for_doc_key(key: str) -> str:
-    """Map docs/foo.pdf → metadata/foo.md.metadata.json (multimodal indexes .md)."""
+    """Map docs/{project}/{user}/foo.pdf → metadata/{user}/foo.md.metadata.json."""
     rel = _object_name_from_key(key)
-    base = os.path.basename(rel)
-    stem, ext = os.path.splitext(base)
+    stem, ext = os.path.splitext(rel)
     if ext.lower() == ".pdf":
         return f"{meta_prefix}{stem}.md.metadata.json"
-    return f"{meta_prefix}{base}.metadata.json"
+    return f"{meta_prefix}{rel}.metadata.json"
 
 
 def companion_md_key_for_doc_key(key: str) -> str:
-    """Map docs/foo.pdf → markdown/foo.md (multimodal img2text S3 output)."""
+    """Map docs/{project}/{user}/foo.pdf → markdown/{user}/foo.md."""
     rel = _object_name_from_key(key)
-    stem, _ = os.path.splitext(os.path.basename(rel))
+    stem, _ = os.path.splitext(rel)
     return f"markdown/{stem}.md"
 
 

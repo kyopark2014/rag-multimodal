@@ -28,7 +28,7 @@ python3 installer.py
 | `bucket_name` | `storage-for-rag-project-{account_id}-{region}` | 문서 저장 S3 버킷 |
 | `opensearch_domain_name` | `project_name`과 동일 | 관리형 OpenSearch 도메인 이름 |
 | `OPENSEARCH_MASTER_USERNAME` | `admin` | Dashboards FGAC 마스터 사용자 |
-| `S3_DOCS_PREFIX` | `docs/` | 업로드·이벤트 대상 프리픽스 |
+| `S3_DOCS_PREFIX` | `docs/{projectName}/` | 업로드·이벤트 대상 프리픽스 (객체는 `{user_id}/` 하위에 저장) |
 | `cloudfront_comment` | `CloudFront-for-rag-project` | 기존 배포 재사용 시 식별용 Comment |
 
 `sts.get_caller_identity()`로 **Account ID**를 읽어 버킷 이름 등에 사용합니다.

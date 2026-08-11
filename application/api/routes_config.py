@@ -181,6 +181,13 @@ def get_config(request: Request):
         "default_skills": default_skills,
         "default_mcp_servers": default_mcp,
         "llm_gateway_configured": bool(gateway_url and gateway_key),
+        # Project base: docs/{projectName}/ ; with session: docs/{projectName}/{user_id}/
+        "s3_docs_prefix": (
+            utils.user_docs_s3_prefix(session_user) + "/"
+            if session_user
+            else utils.docs_s3_prefix() + "/"
+        ),
+        "s3_docs_prefix_project": utils.docs_s3_prefix() + "/",
     }
 
 

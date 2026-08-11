@@ -38,7 +38,7 @@ logger = logging.getLogger("agent")
 
 config = utils.load_config()
 sharing_url = config.get("sharing_url")
-s3_prefix = "docs"
+s3_prefix = utils.docs_s3_prefix()
 capture_prefix = "captures"
 
 s3_bucket = config.get("s3_bucket")

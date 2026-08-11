@@ -465,10 +465,32 @@ if not managed_opensearch_url:
 
 
 def docs_s3_prefix(project: str | None = None) -> str:
-    """Return the S3 docs prefix used by this project (historically ``docs``)."""
-    _ = project
-    configured = (config.get("s3_docs_prefix") or "docs/").strip().strip("/")
-    return configured or "docs"
+    """Return project-scoped docs prefix: ``docs/{projectName}``."""
+    name = (project or projectName or "").strip().strip("/")
+    if not name:
+        name = "default"
+    return f"docs/{name}"
+
+
+def user_docs_s3_prefix(user_id: str | None, project: str | None = None) -> str:
+    """Return per-user docs prefix: ``docs/{projectName}/{user_id}``."""
+    base = docs_s3_prefix(project)
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        return base
+    return f"{base}/{segment}"
+
+
+def ensure_s3_docs_prefix_config() -> str:
+    """Persist project-level ``s3_docs_prefix`` as ``docs/{projectName}/``."""
+    prefix = docs_s3_prefix() + "/"
+    if config.get("s3_docs_prefix") != prefix:
+        persist_config_updates({"s3_docs_prefix": prefix})
+    return prefix
+
+
+# Align config with docs/{projectName}/ (not bare docs/)
+ensure_s3_docs_prefix_config()
 
 
 def upload_to_s3(
@@ -476,7 +498,7 @@ def upload_to_s3(
     file_name: str,
     user_id: str | None = None,
 ) -> dict | None:
-    """Upload a file to S3 under docs/ (or images/) and return metadata."""
+    """Upload under ``docs/{projectName}/{user_id}/`` (or ``images/{user_id}/``)."""
     from urllib import parse
 
     if not s3_bucket:
@@ -488,15 +510,14 @@ def upload_to_s3(
         content_type = get_contents_type(file_name)
         logger.info("content_type: %s", content_type)
 
-        prefix = (
-            "images"
-            if isinstance(content_type, str) and content_type.startswith("image/")
-            else docs_s3_prefix()
-        )
+        is_image = isinstance(content_type, str) and content_type.startswith("image/")
+        prefix = "images" if is_image else docs_s3_prefix()
         user_segment = sanitize_user_path_segment(user_id)
         if user_segment:
             s3_key = f"{prefix}/{user_segment}/{file_name}"
-            relative_url_path = f"{prefix}/{parse.quote(user_segment)}/{parse.quote(file_name)}"
+            relative_url_path = (
+                f"{prefix}/{parse.quote(user_segment)}/{parse.quote(file_name)}"
+            )
         else:
             s3_key = f"{prefix}/{file_name}"
             relative_url_path = f"{prefix}/{parse.quote(file_name)}"
@@ -520,11 +541,19 @@ def upload_to_s3(
         if sharing_url:
             url = f"{sharing_url.rstrip('/')}/{relative_url_path}"
 
+        docs_prefix = (
+            user_docs_s3_prefix(user_id)
+            if user_segment and not is_image
+            else prefix
+        )
+
         return {
             "file_name": file_name,
             "s3_key": s3_key,
             "content_type": content_type,
             "url": url,
+            "docs_prefix": docs_prefix,
+            "s3_docs_prefix": f"{docs_prefix}/",
         }
     except Exception:
         logger.error("Error uploading to S3: %s", traceback.format_exc())

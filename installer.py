@@ -61,8 +61,8 @@ OPENSEARCH_BACKEND_ROLE_NAME = "all_access"
 
 bucket_name = f"storage-for-rag-project-{account_id}-{region}"
 
-# S3 docs prefix (application/chat.py, multimodal.py) and lambda-s3-event-manager
-S3_DOCS_PREFIX = "docs/"
+# S3 docs prefix: docs/{projectName}/ (per-user objects live under {user_id}/)
+S3_DOCS_PREFIX = f"docs/{project_name}/"
 LAMBDA_S3_EVENT_FUNCTION_NAME = f"lambda-s3-event-manager-for-{project_name}"
 LAMBDA_S3_EVENT_ROLE_NAME = f"role-lambda-s3-event-manager-for-{project_name}-{region}"
 LAMBDA_S3_EVENT_SOURCE_DIR = os.path.join(
@@ -151,10 +151,10 @@ def create_s3_bucket() -> str:
         try:
             s3_client.put_object(
                 Bucket=bucket_name,
-                Key="docs/",
+                Key=S3_DOCS_PREFIX,
                 Body=b""
             )
-            logger.debug("docs folder created successfully")
+            logger.debug("%s folder created successfully", S3_DOCS_PREFIX)
         except ClientError as e:
             logger.warning(f"Failed to create docs folder: {e}")
         
@@ -169,10 +169,10 @@ def create_s3_bucket() -> str:
             try:
                 s3_client.put_object(
                     Bucket=bucket_name,
-                    Key="docs/",
+                    Key=S3_DOCS_PREFIX,
                     Body=b""
                 )
-                logger.debug("docs folder created successfully")
+                logger.debug("%s folder created successfully", S3_DOCS_PREFIX)
             except ClientError as folder_error:
                 if folder_error.response["Error"]["Code"] != "NoSuchBucket":
                     logger.warning(f"Failed to create docs folder: {folder_error}")

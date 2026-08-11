@@ -24,7 +24,7 @@
 <img width="900" alt="image" src="https://github.com/user-attachments/assets/f76f3457-764d-416c-911f-c7081b29510d" />
 
 
-1. React UI에서 PDF 업로드 → **S3** `docs/` 저장 (원본 참조용 **CloudFront** URL)
+1. React UI에서 PDF 업로드 → **S3** `docs/{projectName}/{user_id}/` 저장 (원본 참조용 **CloudFront** URL)
 2. [`multimodal.py`](./application/multimodal.py)가 페이지별 이미지 추출 → 멀티모달 LLM으로 **Markdown** 생성
 3. 청킹·임베딩 후 **OpenSearch** 적재, 벡터 `id`는 S3 `metadata/*.metadata.json`에 저장
 4. **Agent** 질의 시 opensearch MCP로 하이브리드 검색 → grading → 답변 context 구성
@@ -351,11 +351,11 @@ def img2text(images: list[str], filename: Optional[str] = None) -> list[str]:
     return extracted_text        
 ```
 
-React UI에서 업로드한 PDF는 S3 `docs/`에 저장됩니다. 사용자가 S3에서 PDF를 삭제하면 **버킷 알림**이 `lambda-s3-event-manager` Lambda를 호출하고, 업로드 시 저장한 `metadata/*.metadata.json`의 `ids`로 OpenSearch 벡터를 정리합니다. 상세 배포는 [installer.md](./installer.md) §4, `python3 installer.py`의 `deploy_lambda_s3_event_manager()`를 참고하세요.
+React UI에서 업로드한 PDF는 S3 `docs/{projectName}/{user_id}/`에 저장됩니다. 사용자가 S3에서 PDF를 삭제하면 **버킷 알림**이 `lambda-s3-event-manager` Lambda를 호출하고, 업로드 시 저장한 `metadata/{user_id}/*.metadata.json`의 `ids`로 OpenSearch 벡터를 정리합니다. 상세 배포는 [installer.md](./installer.md) §4, `python3 installer.py`의 `deploy_lambda_s3_event_manager()`를 참고하세요.
 
 | 구성 | 내용 |
 |------|------|
-| 알림 대상 | `docs/` 프리픽스 (`s3_docs_prefix`) |
+| 알림 대상 | `docs/{projectName}/` 프리픽스 (`s3_docs_prefix`) |
 | 이벤트 | `s3:ObjectRemoved:*` (삭제·버전 삭제 등) |
 | 수신자 | `lambda-s3-event-manager-for-{project_name}` |
 | 알림 ID | `{project_name}-docs-s3-event` |

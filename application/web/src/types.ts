@@ -46,6 +46,10 @@ export interface AppConfig {
   default_skills: string[];
   default_mcp_servers: string[];
   llm_gateway_configured?: boolean;
+  /** Session-scoped: docs/{project}/{user_id}/ when logged in */
+  s3_docs_prefix?: string;
+  /** Project base: docs/{project}/ */
+  s3_docs_prefix_project?: string;
 }
 
 export interface DashboardSummary {

@@ -62,6 +62,46 @@ os_client = OpenSearch(
     connection_class=RequestsHttpConnection,
 )
 
+def _access_metadata(metadata: dict | None) -> dict:
+    """Normalize owner/team/created_time/is_confidential from indexed metadata.
+
+    Accepts either flat OpenSearch fields or Bedrock KB ``metadataAttributes``
+    (from ``{file}.metadata.json`` sidecar).
+    """
+    meta = metadata or {}
+    if isinstance(meta.get("metadataAttributes"), dict):
+        try:
+            from application.services.rag_service import flatten_kb_metadata_attributes
+        except ImportError:
+            from services.rag_service import flatten_kb_metadata_attributes  # type: ignore
+        meta = {**meta, **flatten_kb_metadata_attributes(meta)}
+
+    created = meta.get("created_time", "")
+    if created in (None, ""):
+        created = ""
+    else:
+        try:
+            created = int(created)
+        except (TypeError, ValueError):
+            created = created
+    confidential = meta.get("is_confidential", False)
+    if isinstance(confidential, str):
+        confidential = confidential.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        confidential = bool(confidential)
+
+    owner = meta.get("owner", "") or ""
+    if isinstance(owner, list):
+        owner = next((str(v).strip() for v in owner if v is not None and str(v).strip()), "")
+
+    return {
+        "owner": owner,
+        "team": meta.get("team", "") or "mycompany",
+        "created_time": created,
+        "is_confidential": confidential,
+    }
+
+
 def lexical_search(query, top_k):
     min_match = 0
 
@@ -109,6 +149,7 @@ def lexical_search(query, top_k):
                     "url": url,
                     "page": page,
                     "from": "lexical",
+                    **_access_metadata(metadata),
                 },
             )
         )
@@ -129,7 +170,7 @@ def get_parent_content(parent_doc_id):
     name = metadata.get("name", "") or ""
     url = metadata.get("url", "") or ""
 
-    return source["text"], name, url
+    return source["text"], name, url, metadata
 
 
 _CONTEXTUAL_PREFIX_MARKERS = (
@@ -271,12 +312,15 @@ def retrieve_documents_from_opensearch(query, top_k):
             f"## Document(opensearch-vector) {i+1}: parent_doc_id={parent_doc_id}, page={page}, score={score}"
         )
 
-        content, name, url = get_parent_content(parent_doc_id)
+        content, name, url, parent_meta = get_parent_content(parent_doc_id)
         logger.info(f"content: {content}")
 
         body = content_after_first_separator(content)
         reference_content = reference_content_from_text(body)
         logger.info(f"reference_content: {reference_content}")
+
+        # Prefer child metadata; fall back to parent for access fields
+        access_meta = _access_metadata({**parent_meta, **metadata})
 
         relevant_docs.append(
             Document(
@@ -287,6 +331,7 @@ def retrieve_documents_from_opensearch(query, top_k):
                     "doc_level": doc_level,
                     "page": page,
                     "from": "vector",
+                    **access_meta,
                 },
             )
         )
@@ -482,6 +527,10 @@ def retrieve(query: str) -> str:
                     "title": title,
                     "page": page,
                     "from": doc.metadata.get("from", "RAG"),
+                    "owner": doc.metadata.get("owner", ""),
+                    "team": doc.metadata.get("team", "mycompany"),
+                    "created_time": doc.metadata.get("created_time", ""),
+                    "is_confidential": doc.metadata.get("is_confidential", False),
                 },
             }
         )

@@ -77,11 +77,11 @@ bedrock_region = config.get("region", "ap-northeast-2")
 accountId = config.get("accountId")
 knowledge_base_name = config.get("knowledge_base_name")
 s3_bucket = config.get("s3_bucket")
-s3_prefix = "docs"
+s3_prefix = utils.docs_s3_prefix()
 s3_image_prefix = "images"
 
 path = config.get('sharing_url', '')
-doc_prefix = "docs/"
+doc_prefix = f"{utils.docs_s3_prefix()}/"
 
 model_name = "Claude 5.0 Sonnet"
 model_type = "claude"
@@ -706,51 +706,13 @@ def get_summary_of_uploaded_file(file_name, st):
 
 def upload_to_s3(file_bytes, file_name):
     """
-    Upload a file to S3 and return the URL
+    Upload a file to S3 and return the URL.
+    Prefers utils.upload_to_s3 so docs land under docs/{project}/{user_id}/.
     """
-
-    try:
-        s3_client = boto3.client(
-            service_name='s3',
-            region_name=bedrock_region,
-        )
-
-        # Generate a unique file name to avoid collisions
-        #timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        #unique_id = str(uuid.uuid4())[:8]
-        #s3_key = f"uploaded_images/{timestamp}_{unique_id}_{file_name}"
-
-        content_type = utils.get_contents_type(file_name)       
-        logger.info(f"content_type: {content_type}") 
-
-        if content_type == "image/jpeg" or content_type == "image/png":
-            prefix = s3_image_prefix
-        else:
-            prefix = s3_prefix
-
-        s3_key = f"{prefix}/{file_name}"
-        url = f"{path}/{prefix}/{parse.quote(file_name)}"
-
-        user_meta = {  # user-defined metadata
-            "content_type": content_type,
-            "model_name": model_name
-        }
-
-        response = s3_client.put_object(
-            Bucket=s3_bucket,
-            Key=s3_key,
-            ContentType=content_type,
-            Metadata=user_meta,
-            Body=file_bytes
-        )
-        logger.info(f"upload response: {response}")
-
-        return url
-    
-    except Exception as e:
-        err_msg = f"Error uploading to S3: {str(e)}"
-        logger.info(f"{err_msg}")
-        return None
+    result = utils.upload_to_s3(file_bytes, file_name, user_id=user_id)
+    if result:
+        return result.get("url")
+    return None
 
 def isKorean(text):
     # check korean
@@ -1392,7 +1354,7 @@ def update_final_result(notification_queue, message):
 tool_input_list = dict()
 
 sharing_url = config["sharing_url"] if "sharing_url" in config else None
-s3_prefix = "docs"
+s3_prefix = utils.docs_s3_prefix()
 capture_prefix = "captures"
 
 def get_tool_info(tool_name, tool_content):

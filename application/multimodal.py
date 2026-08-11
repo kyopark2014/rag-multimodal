@@ -37,7 +37,7 @@ config = utils.load_config()
 s3_bucket = config.get("s3_bucket")
 region = config.get("region", "us-west-2")
 sharing_url = (config.get("sharing_url") or "").rstrip("/")
-s3_prefix = "docs"
+s3_prefix = utils.docs_s3_prefix()
 markdown_s3_prefix = "markdown"
 meta_prefix = "metadata/"
 
@@ -223,13 +223,26 @@ def create_metadata(bucket, key, meta_prefix, url, category, documentId, ids, fi
     }
     print('metadata: ', metadata)
 
-    if markdown_s3_prefix in key:
-        rel_key = key[key.find(markdown_s3_prefix) + len(markdown_s3_prefix) + 1 :]
-    elif s3_prefix in key:
-        rel_key = key[key.find(s3_prefix) + len(s3_prefix) + 1 :]
+    # Preserve relative path under markdown/ or docs/{project}/ so per-user
+    # keys (e.g. user_id/file.md) map to metadata/user_id/file.md.metadata.json
+    if key.startswith(f"{markdown_s3_prefix}/"):
+        rel_key = key[len(markdown_s3_prefix) + 1 :]
     else:
-        rel_key = key
-    objectName = os.path.basename(rel_key)
+        docs_base = (s3_prefix or utils.docs_s3_prefix()).rstrip("/")
+        if key.startswith(f"{docs_base}/"):
+            rel_key = key[len(docs_base) + 1 :]
+        elif markdown_s3_prefix in key:
+            rel_key = key[key.find(markdown_s3_prefix) + len(markdown_s3_prefix) + 1 :]
+        elif "docs/" in key:
+            rel_key = key.split("docs/", 1)[1]
+            # drop project segment if present: project/user/file → user/file
+            project = (config.get("projectName") or "").strip("/")
+            if project and rel_key.startswith(f"{project}/"):
+                rel_key = rel_key[len(project) + 1 :]
+        else:
+            rel_key = key
+    # Keep nested path (do not collapse to basename) for user isolation
+    objectName = rel_key.lstrip("/")
     print('objectName: ', objectName)
 
     client = boto3.client('s3')
@@ -255,13 +268,59 @@ def get_documentId(key, category):
                 
     return documentId
 
-def add_to_opensearch(body, name: str = "", url: str = ""):
+def add_to_opensearch(
+    body,
+    name: str = "",
+    url: str = "",
+    *,
+    owner: str | None = None,
+    team: str = "mycompany",
+    is_confidential: bool = False,
+    created_time: int | None = None,
+    access_metadata: dict | None = None,
+):
     index_name = config.get("projectName")
-    doc_metadata = {}
+    access = dict(access_metadata or {})
+    owner_id = (
+        (access.get("owner") if access.get("owner") not in (None, "") else None)
+        or owner
+        or getattr(chat, "user_id", None)
+        or ""
+    ).strip() or "unknown"
+    team_value = (access.get("team") if access.get("team") not in (None, "") else None) or team or "mycompany"
+    if access.get("created_time") not in (None, ""):
+        try:
+            created = int(access["created_time"])
+        except (TypeError, ValueError):
+            created = int(created_time if created_time is not None else time.time())
+    else:
+        created = int(created_time if created_time is not None else time.time())
+    if "is_confidential" in access:
+        confidential = access["is_confidential"]
+        if isinstance(confidential, str):
+            confidential = confidential.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            confidential = bool(confidential)
+    else:
+        confidential = bool(is_confidential)
+
+    doc_metadata = {
+        "owner": owner_id,
+        "team": team_value,
+        "created_time": created,
+        "is_confidential": confidential,
+    }
     if name:
         doc_metadata["name"] = name
     if url:
         doc_metadata["url"] = url
+    logger.info(
+        "OpenSearch doc metadata: owner=%s team=%s created_time=%s is_confidential=%s",
+        doc_metadata["owner"],
+        doc_metadata["team"],
+        doc_metadata["created_time"],
+        doc_metadata["is_confidential"],
+    )
     session = boto3.Session(region_name=region)
     credentials = session.get_credentials()
     bedrock_embeddings = get_embedding()
@@ -467,7 +526,30 @@ def pdf_to_images(file_url: str, dpi: Optional[int] = None) -> list[str]:
         if is_temp and os.path.isfile(pdf_path):
             os.remove(pdf_path)
 
-def img2text(images: list[str], filename: Optional[str] = None) -> list[str]:
+def _docs_relative_key(file_url: str) -> Optional[str]:
+    """Return path under ``docs/{project}/`` (e.g. ``{user_id}/{file}.pdf``)."""
+    s3_key = _s3_key_from_url(file_url)
+    if not s3_key:
+        return None
+    docs_base = (s3_prefix or utils.docs_s3_prefix()).rstrip("/")
+    if s3_key.startswith(f"{docs_base}/"):
+        return s3_key[len(docs_base) + 1 :]
+    # Legacy docs/{file} without project segment
+    if s3_key.startswith("docs/"):
+        rest = s3_key[len("docs/") :]
+        project = (config.get("projectName") or "").strip("/")
+        if project and rest.startswith(f"{project}/"):
+            return rest[len(project) + 1 :]
+        return rest
+    return os.path.basename(s3_key)
+
+
+def img2text(
+    images: list[str],
+    filename: Optional[str] = None,
+    source_url: Optional[str] = None,
+    access_metadata: Optional[dict] = None,
+) -> list[str]:
     """Convert images to per-page markdown files (e.g. page_001.png → page_001.md).
 
     Markdown files are always written under ``artifacts/<filename>/``.
@@ -475,15 +557,29 @@ def img2text(images: list[str], filename: Optional[str] = None) -> list[str]:
     Args:
         images: List of absolute paths to the image files.
         filename: Artifacts subfolder name (defaults to parent dir of the first image).
+        source_url: Original PDF URL/key used to derive per-user S3 relative paths.
+        access_metadata: Flattened owner/team/created_time/is_confidential from
+            ``{pdf}.metadata.json`` sidecar (or loaded from S3 when omitted).
 
     Returns:
-        List of absolute paths to the generated markdown files.
+        Extracted markdown text (concatenated pages).
     """
     if filename is None:
         filename = os.path.basename(os.path.dirname(images[0]))
     output_dir = os.path.join(ARTIFACTS_DIR, filename)
     os.makedirs(output_dir, exist_ok=True)
     saved: list[str] = []
+
+    # Resolve access metadata from caller or docs sidecar ``{pdf}.metadata.json``
+    access = dict(access_metadata or {})
+    if not access and source_url:
+        pdf_key = _s3_key_from_url(source_url)
+        if pdf_key:
+            try:
+                from application.services.rag_service import load_docs_sidecar_metadata
+            except ImportError:
+                from services.rag_service import load_docs_sidecar_metadata  # type: ignore
+            access = load_docs_sidecar_metadata(pdf_key)
 
     # Extract text from each image and save as a markdown file
     pages: list[str] = []
@@ -513,7 +609,12 @@ def img2text(images: list[str], filename: Optional[str] = None) -> list[str]:
     # Upload concatenated page text as a single markdown file to S3
     extracted_text = '\n'.join(pages)
     s3_client = boto3.client("s3", region_name=region) if s3_bucket else None
-    s3_key = f"{markdown_s3_prefix}/{filename}.md"
+    docs_rel = _docs_relative_key(source_url) if source_url else None
+    if docs_rel:
+        markdown_rel = f"{os.path.splitext(docs_rel)[0]}.md"
+    else:
+        markdown_rel = f"{filename}.md"
+    s3_key = f"{markdown_s3_prefix}/{markdown_rel}"
     s3_client.put_object(
         Bucket=s3_bucket,
         Key=s3_key,
@@ -523,8 +624,9 @@ def img2text(images: list[str], filename: Optional[str] = None) -> list[str]:
     logger.info(f"Uploaded s3://{s3_bucket}/{s3_key}")
 
     # Log the CloudFront sharing URL for the uploaded markdown
-    config = utils.load_config()
-    markdown_url = config['sharing_url'] + f"/{markdown_s3_prefix}/{filename}.md"
+    config_local = utils.load_config()
+    sharing = (config_local.get("sharing_url") or sharing_url or "").rstrip("/")
+    markdown_url = f"{sharing}/{s3_key}" if sharing else s3_key
     logger.info(f"markdown_url: {markdown_url}")
 
     # Wrap each page with <page> tags for RAG page metadata
@@ -536,26 +638,69 @@ def img2text(images: list[str], filename: Optional[str] = None) -> list[str]:
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(rag_body)
 
-    # add to opensearch
-    path = (config.get("sharing_url") or sharing_url or "").rstrip("/")    
-    doc_url = f"{path}/{s3_prefix}/{filename}.pdf" if path else ""
+    # Prefer the actual upload URL so OpenSearch metadata keeps user path
+    path = sharing
+    if source_url and (
+        source_url.startswith("http://")
+        or source_url.startswith("https://")
+        or source_url.startswith("s3://")
+    ):
+        doc_url = source_url
+    elif docs_rel and path:
+        doc_url = f"{path}/{s3_prefix}/{docs_rel}"
+    elif path:
+        doc_url = f"{path}/{s3_prefix}/{filename}.pdf"
+    else:
+        doc_url = ""
 
-    ids = add_to_opensearch(rag_body, name=filename, url=doc_url)
+    owner_fallback = (
+        docs_rel.split("/", 1)[0] if docs_rel and "/" in docs_rel else None
+    ) or getattr(chat, "user_id", None)
 
-    # metadata for the document
+    ids = add_to_opensearch(
+        rag_body,
+        name=filename,
+        url=doc_url,
+        owner=owner_fallback,
+        access_metadata=access,
+    )
+
+    # metadata for the document (OpenSearch id cleanup under metadata/)
     category = "upload"
     documentId = get_documentId(s3_key, category)
-    create_metadata(bucket=s3_bucket, key=s3_key, meta_prefix=meta_prefix, url=doc_url or path + parse.quote(s3_key), category=category, documentId=documentId, ids=ids, files=saved)
+    create_metadata(
+        bucket=s3_bucket,
+        key=s3_key,
+        meta_prefix=meta_prefix,
+        url=doc_url or (f"{path}/{s3_key}" if path else s3_key),
+        category=category,
+        documentId=documentId,
+        ids=ids,
+        files=saved,
+    )
 
     return extracted_text        
 
-def sync_data_source(file_url: str) -> Optional[list[str]]:
-    """PDF → images → LLM Markdown → S3, then trigger knowledge-base ingestion."""
+def sync_data_source(
+    file_url: str,
+    access_metadata: Optional[dict] = None,
+) -> Optional[list[str]]:
+    """PDF → images → LLM Markdown → S3/OpenSearch indexing.
+
+    ``access_metadata`` comes from ``{file}.metadata.json`` uploaded with the PDF
+    (owner/team/created_time/is_confidential). When omitted, the sidecar is loaded
+    from S3 next to the PDF key.
+    """
     stem = _artifact_stem(file_url)
     images = pdf_to_images(file_url)
     if not images:
         logger.warning("No images generated from PDF")
         return None
 
-    extracted_body = img2text(images, filename=stem)
+    extracted_body = img2text(
+        images,
+        filename=stem,
+        source_url=file_url,
+        access_metadata=access_metadata,
+    )
     return extracted_body if extracted_body else None
