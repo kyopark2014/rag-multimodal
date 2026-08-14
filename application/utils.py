@@ -80,6 +80,13 @@ def ensure_user_skills_dir(user_id: str | None) -> str:
     return skills_dir
 
 
+
+def get_user_db_path(user_id: str | None) -> str:
+    """Durable per-user tasks/messages DB: {SESSION_STORAGE_DIR}/{user_id}/{user_id}.db."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, f"{segment}.db")
+
+
 def get_user_skills_list_path(user_id: str | None) -> str:
     segment = sanitize_user_path_segment(user_id) or "default"
     return os.path.join(SESSION_STORAGE_DIR, segment, "skills.list")
