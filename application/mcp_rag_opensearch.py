@@ -34,7 +34,7 @@ region = config.get("region", "us-west-2")
 enableHybridSearch = "Enable"
 enableGrading = "Enable"
 multi_region = "Disable"
-grading_model_name = "Claude 5.0 Sonnet"
+grading_model_name = "Claude 4.6 Sonnet"
 
 index_name = projectName
 number_of_results = 5
@@ -396,12 +396,15 @@ def _get_grading_chat(models, selected):
             "max_tokens": max_output_tokens,
             "stop_sequences": [stop_sequence],
         }
-    return ChatBedrock(
-        model_id=model_id,
-        client=boto3_bedrock,
-        model_kwargs=parameters,
-        region_name=bedrock_region,
-    )
+    chat_kwargs = {
+        "model_id": model_id,
+        "client": boto3_bedrock,
+        "model_kwargs": parameters,
+        "region_name": bedrock_region,
+    }
+    if model_type == "claude":
+        chat_kwargs["provider"] = "anthropic"
+    return ChatBedrock(**chat_kwargs)
 
 
 def get_retrieval_grader(chat):

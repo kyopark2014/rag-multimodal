@@ -197,7 +197,11 @@ def ingest_rag_upload(
     team: str = DEFAULT_TEAM,
     is_confidential: bool = DEFAULT_IS_CONFIDENTIAL,
 ) -> dict[str, Any]:
-    """Upload PDF + ``{file}.metadata.json`` then run multimodal OpenSearch indexing."""
+    """Upload PDF + metadata to S3, then index via multimodal OCR in the background.
+
+    The HTTP response returns after S3 upload so the UI is not blocked by
+    multi-page LLM OCR (which can take many minutes).
+    """
     global _sync_in_progress
     if not _sync_lock.acquire(blocking=False):
         raise RagServiceError(
@@ -212,6 +216,7 @@ def ingest_rag_upload(
         )
 
     _sync_in_progress = True
+    background_started = False
     try:
         try:
             upload_result = utils.upload_to_s3(file_bytes, file_name, user_id=user_id)
@@ -273,34 +278,51 @@ def ingest_rag_upload(
                     "File uploaded but sharing URL is not configured",
                 )
 
-        try:
-            extracted = multimodal.sync_data_source(
-                file_url,
-                access_metadata=flatten_kb_metadata_attributes(metadata_doc),
-                user_id=user_id,
-            )
-        except Exception:
-            logger.exception("Multimodal OpenSearch sync failed for file=%s", file_name)
-            raise RagServiceError(
-                500,
-                "File uploaded but multimodal OpenSearch indexing failed",
-            ) from None
-        if not extracted:
-            raise RagServiceError(
-                500,
-                "File uploaded but multimodal OpenSearch indexing returned no content",
-            )
+        access_metadata = flatten_kb_metadata_attributes(metadata_doc)
 
-        preview = extracted if isinstance(extracted, str) else str(extracted)
-        if len(preview) > 2000:
-            preview = preview[:2000] + "\n…"
+        def _run_multimodal_sync() -> None:
+            global _sync_in_progress
+            try:
+                extracted = multimodal.sync_data_source(
+                    file_url,
+                    access_metadata=access_metadata,
+                    user_id=user_id,
+                )
+                if not extracted:
+                    logger.warning(
+                        "Multimodal sync returned no content: user=%s file=%s",
+                        user_id,
+                        file_name,
+                    )
+                else:
+                    logger.info(
+                        "RAG index complete: user=%s file=%s s3_key=%s",
+                        user_id,
+                        file_name,
+                        upload_result.get("s3_key"),
+                    )
+            except Exception:
+                logger.exception(
+                    "Multimodal OpenSearch sync failed for file=%s user=%s",
+                    file_name,
+                    user_id,
+                )
+            finally:
+                _sync_in_progress = False
+                _sync_lock.release()
+
+        threading.Thread(
+            target=_run_multimodal_sync,
+            name=f"rag-multimodal-sync-{file_name[:40]}",
+            daemon=True,
+        ).start()
+        background_started = True
 
         logger.info(
-            "RAG upload complete: user=%s file=%s s3_key=%s metadata_key=%s",
+            "RAG upload accepted (indexing in background): user=%s file=%s s3_key=%s",
             user_id,
             file_name,
             upload_result.get("s3_key"),
-            metadata_result.get("s3_key"),
         )
 
         return {
@@ -314,12 +336,14 @@ def ingest_rag_upload(
             "url": upload_result.get("url"),
             "docs_prefix": upload_result.get("docs_prefix"),
             "s3_docs_prefix": upload_result.get("s3_docs_prefix"),
-            "extracted_preview": preview,
-            "sync": {"status": "COMPLETE", "backend": "multimodal-opensearch"},
+            "sync": {"status": "IN_PROGRESS", "backend": "multimodal-opensearch"},
             "message": (
-                f'"{file_name}"가 S3에 업로드되었고 멀티모달 OCR 후 OpenSearch에 인덱싱되었습니다.'
+                f'"{file_name}"가 S3에 업로드되었습니다. '
+                "멀티모달 OCR·OpenSearch 인덱싱은 백그라운드에서 진행됩니다."
             ),
         }
-    finally:
-        _sync_in_progress = False
-        _sync_lock.release()
+    except Exception:
+        if not background_started:
+            _sync_in_progress = False
+            _sync_lock.release()
+        raise

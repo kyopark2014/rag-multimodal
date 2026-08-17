@@ -29,7 +29,7 @@ logger = logging.getLogger("text-extraction-mcp")
 
 config = utils.load_config()
 bedrock_region = config.get("region", "us-west-2")
-model_name = "Claude 5.0 Sonnet"
+model_name = "Claude 4.6 Sonnet"
 models = info.get_model_info(model_name)
 profile = models[0]
 model_id = profile["model_id"]
@@ -52,33 +52,40 @@ except Exception as e:
 def _get_chat():
     """Create ChatBedrock instance for text extraction."""
     stop_sequence = "\n\nHuman:" if model_type == "claude" else ""
-    max_tokens = 16384 if "claude-4" in model_id else 8192
+    mid = (model_id or "").lower()
+    if "claude-sonnet-5" in mid or "claude-5-sonnet" in mid or "claude-opus-5" in mid:
+        max_tokens = 128000
+    elif "claude-4" in mid or "claude-sonnet-4" in mid or "claude-opus-4" in mid:
+        max_tokens = 16384
+    else:
+        max_tokens = 8192
 
-    # bedrock   
     boto3_bedrock = boto3.client(
-        service_name='bedrock-runtime',
+        service_name="bedrock-runtime",
         region_name=bedrock_region,
         config=Config(
-            retries = {
-                'max_attempts': 30
-            },
-            read_timeout=300
-        )
+            retries={"max_attempts": 30},
+            read_timeout=300,
+        ),
     )
 
+    # Do not pass temperature/top_k: Claude 5.x (and some 4.x) reject them
+    # with ValidationException: "`temperature` is deprecated for this model."
     parameters = {
         "max_tokens": max_tokens,
-        "temperature": 0.1,
-        "top_k": 250,
         "stop_sequences": [stop_sequence],
     }
 
-    return ChatBedrock(
-        model_id=model_id,
-        client=boto3_bedrock,
-        model_kwargs=parameters,
-        region_name=bedrock_region,
-    )
+    chat_kwargs = {
+        "model_id": model_id,
+        "client": boto3_bedrock,
+        "model_kwargs": parameters,
+        "region_name": bedrock_region,
+    }
+    if model_type == "claude":
+        chat_kwargs["provider"] = "anthropic"
+
+    return ChatBedrock(**chat_kwargs)
 
 
 def _prepare_image_base64(

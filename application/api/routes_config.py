@@ -21,9 +21,9 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 _APPLICATION_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 MODELS = [
+    "Claude 4.6 Sonnet",
     "Claude 5.0 Sonnet",
     "Claude 5.0 Opus",
-    "Claude 4.6 Sonnet",
     "Claude Fable 5",
     "Claude 4.8 Opus",
     "Claude 4.7 Opus",
@@ -45,7 +45,7 @@ MODELS = [
     "Nova Micro",
 ]
 
-DEFAULT_MODEL = "Claude 5.0 Sonnet"
+DEFAULT_MODEL = "Claude 4.6 Sonnet"
 DEFAULT_GATEWAY_MODEL = "Claude 4.6 Sonnet"
 
 

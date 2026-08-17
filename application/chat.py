@@ -83,7 +83,7 @@ s3_image_prefix = "images"
 path = config.get('sharing_url', '')
 doc_prefix = f"{utils.docs_s3_prefix()}/"
 
-model_name = "Claude 5.0 Sonnet"
+model_name = "Claude 4.6 Sonnet"
 model_type = "claude"
 models = info.get_model_info(model_name)
 number_of_models = len(models)
@@ -381,12 +381,16 @@ def get_chat():
         "stop_sequences": [STOP_SEQUENCE]
     }
 
-    chat = ChatBedrock(   # new chat model
-        model_id=modelId,
-        client=boto3_bedrock, 
-        model_kwargs=parameters,
-        region_name=bedrock_region
-    )
+    chat_kwargs = {
+        "model_id": modelId,
+        "client": boto3_bedrock,
+        "model_kwargs": parameters,
+        "region_name": bedrock_region,
+    }
+    if model_type == "claude":
+        chat_kwargs["provider"] = "anthropic"
+
+    chat = ChatBedrock(**chat_kwargs)  # new chat model
     
     if multi_region=='Enable':
         selected_chat = selected_chat + 1
@@ -804,17 +808,21 @@ def get_parallel_processing_chat(models, selected):
         "max_tokens": maxOutputTokens,
         "stop_sequences": [STOP_SEQUENCE],
     }
-    if not is_fable_model(modelId):
+    # Do not pass temperature/top_k: Claude rejects them on newer models
+    # (ValidationException: "`temperature` is deprecated for this model.").
+    if model_type != "claude":
         parameters["temperature"] = 0.1
         parameters["top_k"] = 250
 
-    chat = ChatBedrock(   # new chat model
-        model_id=modelId,
-        client=boto3_bedrock, 
-        model_kwargs=parameters,
-    )        
-    
-    return chat
+    chat_kwargs = {
+        "model_id": modelId,
+        "client": boto3_bedrock,
+        "model_kwargs": parameters,
+    }
+    if model_type == "claude":
+        chat_kwargs["provider"] = "anthropic"
+
+    return ChatBedrock(**chat_kwargs)
 
 def show_extended_thinking(st, result):
     # logger.info(f"result: {result}")

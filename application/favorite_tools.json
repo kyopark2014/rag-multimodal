@@ -1,7 +1,7 @@
 {
   "MCP": [
     "opensearch",
-    "websearch"
+    "web_fetch"
   ],
   "SKILL": [
     "pdf2img",

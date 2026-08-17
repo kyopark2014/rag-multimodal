@@ -330,7 +330,7 @@ export function ChatInput({
       )}
       {uploading && (
         <div className="chat-upload-status" role="status">
-          업로드 중...
+          문서 업로드 중...
         </div>
       )}
       {queuedMessages.length > 0 && (
