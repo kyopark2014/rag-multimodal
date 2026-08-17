@@ -36,25 +36,30 @@
 ```mermaid
 flowchart TB
   subgraph UI["React SPA + FastAPI (server.py)"]
-    UP[PDF / RAG Upload]
+    AUTH["/api/session"]
+    TASK["/api/tasks + SQLite"]
+    UP["/api/rag/upload PDF"]
+    FU["/api/files/upload 첨부"]
     SKUI[Skill / MCP 선택]
-    CHAT[Agent Chat SSE]
+    CHAT["/api/tasks/{id}/chat SSE"]
   end
 
-  subgraph Indexing["문서 인덱싱 (multimodal.py)"]
-    SYNC[sync_data_source]
+  subgraph Indexing["문서 인덱싱"]
+    RS["rag_service.ingest_rag_upload"]
+    META["KB sidecar .metadata.json"]
+    SYNC["multimodal.sync_data_source"]
     P2I[pdf_to_images]
     I2T[img2text]
     AOS[add_to_opensearch]
   end
 
   subgraph LLM["Amazon Bedrock"]
-    BR[ChatBedrock / invoke_model]
-    EMB[Embeddings]
+    BR["ChatBedrock / ChatOpenAI Mantle"]
+    EMB["Titan Embeddings"]
   end
 
   subgraph Skills["Agent Skills (skill.py)"]
-    SRC["skills/*/SKILL.md"]
+    SRC["skills/pdf2img, img2text"]
     BSP[build_skill_prompt]
     GSI[get_skill_instructions]
   end
@@ -65,13 +70,15 @@ flowchart TB
     SG["StateGraph: agent ↔ ToolNode"]
     BT["Built-in: execute_code, read/write_file, bash, upload_file_to_s3, get_current_time"]
     MC[MultiServerMCPClient]
+    WIKI["add_to_wiki → ~/Documents/wiki"]
   end
 
   subgraph MCPServers["MCP Servers (mcp_config.py)"]
-    OS[mcp_server_opensearch → retrieve]
-    TE[mcp_server_text_extraction]
+    OS["rag-opensearch → retrieve"]
+    TE[text_extraction]
     AWS[aws_documentation]
     WF[web_fetch]
+    WS["websearch AgentCore Gateway"]
   end
 
   subgraph Search["RAG 검색 (mcp_rag_opensearch.py)"]
@@ -81,18 +88,29 @@ flowchart TB
   end
 
   subgraph Storage["Storage"]
-    ART[.session_storage/{user_id}/artifacts/]
-    S3[(S3: docs/, metadata/)]
+    ART[".session_storage/{user_id}/artifacts/"]
+    TDB[(tasks.db)]
+    S3[(S3: docs/, images/, markdown/, metadata/)]
     OSDB[(Managed OpenSearch)]
   end
 
-  UP -->|upload_to_s3| S3
-  UP --> SYNC
+  subgraph Cleanup["S3 삭제 정리"]
+    LAM[lambda-s3-event-manager]
+  end
+
+  AUTH --> TASK
+  TASK --> TDB
+  UP --> RS
+  RS -->|upload_to_s3 + sidecar| S3
+  RS --> META
+  META --> SYNC
+  RS --> SYNC
   SYNC --> P2I --> I2T --> AOS
   I2T --> BR
   AOS --> EMB
   AOS --> OSDB
   AOS --> S3
+  FU -->|images/{user_id}/| S3
 
   CHAT --> RLA
   SKUI -->|skill_list| BSP
@@ -115,6 +133,9 @@ flowchart TB
   OSDB --> LEX
   BT --> ART
   BT --> S3
+  RLA -.->|artifacts| WIKI
+  S3 -->|ObjectRemoved| LAM
+  LAM -->|metadata ids| OSDB
 ```
 
 | 모드 | 모듈 | 설명 |
