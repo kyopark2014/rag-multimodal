@@ -20,8 +20,7 @@
 
 전체 아키텍처는 아래와 같습니다. 개발 환경은 **로컬 PC** 기준입니다.
 
-
-<img width="900" alt="image" src="https://github.com/user-attachments/assets/f76f3457-764d-416c-911f-c7081b29510d" />
+<img width="775" height="644" alt="image" src="https://github.com/user-attachments/assets/35fb4f3a-0149-4923-be58-a6e34843b8f7" />
 
 
 1. React UI에서 PDF 업로드 → **S3** `docs/{projectName}/{user_id}/` 저장 (원본 참조용 **CloudFront** URL)
