@@ -31,9 +31,42 @@ logging.basicConfig(
 logger = logging.getLogger("multimodal")
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
-ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
 
 config = utils.load_config()
+
+
+def _resolve_user_id(
+    user_id: str | None = None,
+    *,
+    access_metadata: dict | None = None,
+    source_url: str | None = None,
+) -> str | None:
+    """Prefer explicit user_id, then access owner, docs path segment, then chat session."""
+    if user_id and str(user_id).strip():
+        return str(user_id).strip()
+    access = access_metadata or {}
+    owner = access.get("owner")
+    if isinstance(owner, (list, tuple)) and owner:
+        owner = owner[0]
+    if owner and str(owner).strip():
+        return str(owner).strip()
+    docs_rel = _docs_relative_key(source_url) if source_url else None
+    if docs_rel and "/" in docs_rel:
+        return docs_rel.split("/", 1)[0]
+    return getattr(chat, "user_id", None)
+
+
+def _user_artifacts_dir(user_id: str | None = None) -> str:
+    """Return ``.session_storage/{user_id}/artifacts`` (creates dirs when possible)."""
+    segment = utils.sanitize_user_path_segment(user_id)
+    if segment:
+        try:
+            return utils.ensure_user_artifacts_dir(segment)
+        except ValueError:
+            pass
+    return utils.get_user_artifacts_dir(user_id)
+
+
 s3_bucket = config.get("s3_bucket")
 region = config.get("region", "us-west-2")
 sharing_url = (config.get("sharing_url") or "").rstrip("/")
@@ -481,14 +514,23 @@ def upload_to_s3(file_bytes, key):
         logger.error(err_msg)
         return None
 
-def pdf_to_images(file_url: str, dpi: Optional[int] = None) -> list[str]:
+def pdf_to_images(
+    file_url: str,
+    dpi: Optional[int] = None,
+    *,
+    user_id: Optional[str] = None,
+    access_metadata: Optional[dict] = None,
+) -> list[str]:
     """Convert every page of the PDF at *file_url* to PNG images.
 
     *file_url* may be a local path, S3 URI, sharing URL, or S3 object key.
-    Images are saved under ``artifacts/<pdf_stem>/page_001.png``, …
+    Images are saved under
+    ``.session_storage/<user_id>/artifacts/<pdf_stem>/page_001.png``, …
 
     Args:
         dpi: Resolution for rendered images. Defaults to 150 when omitted.
+        user_id: Session user id for the artifacts workspace.
+        access_metadata: Optional owner/team metadata used to resolve user_id.
 
     Returns:
         List of absolute paths to the saved image files.
@@ -500,7 +542,10 @@ def pdf_to_images(file_url: str, dpi: Optional[int] = None) -> list[str]:
     pdf_path, is_temp = _resolve_pdf_path(file_url)
     stem = _artifact_stem(file_url)
     try:
-        output_dir = os.path.join(ARTIFACTS_DIR, stem)
+        artifacts_dir = _user_artifacts_dir(
+            _resolve_user_id(user_id, access_metadata=access_metadata, source_url=file_url)
+        )
+        output_dir = os.path.join(artifacts_dir, stem)
         os.makedirs(output_dir, exist_ok=True)
 
         doc = fitz.open(pdf_path)
@@ -549,10 +594,12 @@ def img2text(
     filename: Optional[str] = None,
     source_url: Optional[str] = None,
     access_metadata: Optional[dict] = None,
+    user_id: Optional[str] = None,
 ) -> list[str]:
     """Convert images to per-page markdown files (e.g. page_001.png → page_001.md).
 
-    Markdown files are always written under ``artifacts/<filename>/``.
+    Markdown files are written under
+    ``.session_storage/<user_id>/artifacts/<filename>/``.
 
     Args:
         images: List of absolute paths to the image files.
@@ -560,13 +607,17 @@ def img2text(
         source_url: Original PDF URL/key used to derive per-user S3 relative paths.
         access_metadata: Flattened owner/team/created_time/is_confidential from
             ``{pdf}.metadata.json`` sidecar (or loaded from S3 when omitted).
+        user_id: Session user id for the artifacts workspace.
 
     Returns:
         Extracted markdown text (concatenated pages).
     """
     if filename is None:
         filename = os.path.basename(os.path.dirname(images[0]))
-    output_dir = os.path.join(ARTIFACTS_DIR, filename)
+    artifacts_dir = _user_artifacts_dir(
+        _resolve_user_id(user_id, access_metadata=access_metadata, source_url=source_url)
+    )
+    output_dir = os.path.join(artifacts_dir, filename)
     os.makedirs(output_dir, exist_ok=True)
     saved: list[str] = []
 
@@ -684,15 +735,26 @@ def img2text(
 def sync_data_source(
     file_url: str,
     access_metadata: Optional[dict] = None,
+    user_id: Optional[str] = None,
 ) -> Optional[list[str]]:
     """PDF → images → LLM Markdown → S3/OpenSearch indexing.
 
     ``access_metadata`` comes from ``{file}.metadata.json`` uploaded with the PDF
     (owner/team/created_time/is_confidential). When omitted, the sidecar is loaded
     from S3 next to the PDF key.
+
+    Intermediate PNG/MD files go under
+    ``.session_storage/<user_id>/artifacts/<stem>/``.
     """
     stem = _artifact_stem(file_url)
-    images = pdf_to_images(file_url)
+    resolved_user = _resolve_user_id(
+        user_id, access_metadata=access_metadata, source_url=file_url
+    )
+    images = pdf_to_images(
+        file_url,
+        user_id=resolved_user,
+        access_metadata=access_metadata,
+    )
     if not images:
         logger.warning("No images generated from PDF")
         return None
@@ -702,5 +764,6 @@ def sync_data_source(
         filename=stem,
         source_url=file_url,
         access_metadata=access_metadata,
+        user_id=resolved_user,
     )
     return extracted_body if extracted_body else None

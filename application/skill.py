@@ -18,10 +18,39 @@ logger = logging.getLogger("skill")
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(WORKING_DIR, "skills")
-ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
+# Per-user artifacts / skills under SESSION_STORAGE_DIR (via set_user_workspace).
+ARTIFACTS_DIR = utils.get_user_artifacts_dir("default")
+USER_SKILLS_DIR = utils.get_user_skills_dir("default")
 
 config = utils.load_config()
 sharing_url = config.get("sharing_url")
+
+
+def set_user_artifacts(user_id: str | None) -> str:
+    """Point ARTIFACTS_DIR at {SESSION_STORAGE_DIR}/{user_id}/artifacts for skill prompts."""
+    global ARTIFACTS_DIR
+    artifacts_dir = utils.ensure_user_artifacts_dir(user_id)
+    ARTIFACTS_DIR = artifacts_dir
+    logger.info(f"skill ARTIFACTS_DIR set for user {user_id!r}: {artifacts_dir}")
+    return artifacts_dir
+
+
+def set_user_skills(user_id: str | None) -> str:
+    """Point USER_SKILLS_DIR and ensure per-user skills.list exists."""
+    global USER_SKILLS_DIR
+    skills_dir = utils.ensure_user_skills_dir(user_id)
+    USER_SKILLS_DIR = skills_dir
+    utils.ensure_user_skills_list(user_id)
+    logger.info(f"skill USER_SKILLS_DIR set for user {user_id!r}: {skills_dir}")
+    return skills_dir
+
+
+def set_user_workspace(user_id: str | None) -> tuple[str, str]:
+    """Configure per-user artifacts + skills dirs; create skills.list if missing."""
+    artifacts_dir = set_user_artifacts(user_id)
+    skills_dir = set_user_skills(user_id)
+    return artifacts_dir, skills_dir
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  Skill Manager – implementation of Anthropic Agent Skills spec
@@ -238,6 +267,7 @@ def build_skill_prompt(skill_info: list) -> str:
         f"## Paths (use absolute paths for write_file, read_file)\n"
         f"- WORKING_DIR: {WORKING_DIR}\n"
         f"- ARTIFACTS_DIR: {ARTIFACTS_DIR}\n"
+        f"- USER_SKILLS_DIR: {USER_SKILLS_DIR}\n"
         f"Example: write_file(filepath='{os.path.join(ARTIFACTS_DIR, 'report.drawio')}', content='...')\n\n"
     )
 
@@ -300,6 +330,7 @@ def build_command_prompt(plugin_name: str, command: str) -> str:
         f"## Paths (use absolute paths for write_file, read_file)\n"
         f"- WORKING_DIR: {WORKING_DIR}\n"
         f"- ARTIFACTS_DIR: {ARTIFACTS_DIR}\n"
+        f"- USER_SKILLS_DIR: {USER_SKILLS_DIR}\n"
         f"Example: write_file(filepath='{os.path.join(ARTIFACTS_DIR, 'report.drawio')}', content='...')\n\n"
     )
 

@@ -277,6 +277,7 @@ def ingest_rag_upload(
             extracted = multimodal.sync_data_source(
                 file_url,
                 access_metadata=flatten_kb_metadata_attributes(metadata_doc),
+                user_id=user_id,
             )
         except Exception:
             logger.exception("Multimodal OpenSearch sync failed for file=%s", file_name)

@@ -64,11 +64,97 @@ from langchain_core.tools import tool
 from pathlib import Path
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
-ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
+# Per-user artifacts/skills under SESSION_STORAGE_DIR (set via set_user_workspace).
+ARTIFACTS_DIR = utils.get_user_artifacts_dir("default")
+USER_SKILLS_DIR = utils.get_user_skills_dir("default")
 
 ARTIFACT_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"})
 
 _mpl_runtime_ready = False
+
+_EXCLUDED_SNAPSHOT_DIRS = frozenset({
+    "node_modules",
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "site-packages",
+    "dist",
+    "build",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".session_storage",  # scan only the active user's ARTIFACTS_DIR below
+})
+
+
+def set_user_artifacts(user_id: str | None) -> str:
+    """Point ARTIFACTS_DIR at {SESSION_STORAGE_DIR}/{user_id}/artifacts."""
+    global ARTIFACTS_DIR
+    artifacts_dir = utils.ensure_user_artifacts_dir(user_id)
+    ARTIFACTS_DIR = artifacts_dir
+    exec_globals = globals().get("_exec_globals")
+    if isinstance(exec_globals, dict):
+        exec_globals["ARTIFACTS_DIR"] = artifacts_dir
+        if "USER_SKILLS_DIR" in globals():
+            exec_globals["USER_SKILLS_DIR"] = USER_SKILLS_DIR
+    logger.info(f"ARTIFACTS_DIR set for user {user_id!r}: {artifacts_dir}")
+    return artifacts_dir
+
+
+def set_user_skills(user_id: str | None) -> str:
+    """Point USER_SKILLS_DIR and ensure per-user skills.list exists."""
+    global USER_SKILLS_DIR
+    skills_dir = utils.ensure_user_skills_dir(user_id)
+    USER_SKILLS_DIR = skills_dir
+    utils.ensure_user_skills_list(user_id)
+    exec_globals = globals().get("_exec_globals")
+    if isinstance(exec_globals, dict):
+        exec_globals["USER_SKILLS_DIR"] = skills_dir
+    logger.info(f"USER_SKILLS_DIR set for user {user_id!r}: {skills_dir}")
+    return skills_dir
+
+
+def set_user_workspace(user_id: str | None) -> tuple[str, str]:
+    """Configure per-user artifacts + skills dirs; create skills.list if missing."""
+    artifacts_dir = set_user_artifacts(user_id)
+    skills_dir = set_user_skills(user_id)
+    return artifacts_dir, skills_dir
+
+
+def _expand_user_skills_token(raw: str) -> str:
+    """Expand $USER_SKILLS_DIR / ${USER_SKILLS_DIR} using the current workspace path."""
+    if not USER_SKILLS_DIR or "$" not in raw:
+        return raw
+    expanded = raw
+    for token in ("${USER_SKILLS_DIR}", "$USER_SKILLS_DIR", "${user_skills_dir}", "$user_skills_dir"):
+        expanded = expanded.replace(token, USER_SKILLS_DIR)
+    return expanded
+
+
+def _path_is_under(path: str, root: str) -> bool:
+    if not path or not root:
+        return False
+    try:
+        norm_path = os.path.normpath(path)
+        norm_root = os.path.normpath(root)
+        return os.path.commonpath([norm_path, norm_root]) == norm_root
+    except ValueError:
+        return False
+
+
+def _resolve_workdir_path(filepath: str) -> str:
+    """Resolve filepath; map relative artifacts/ onto ARTIFACTS_DIR; allow USER_SKILLS_DIR."""
+    if not filepath:
+        return filepath
+    filepath = _expand_user_skills_token(filepath)
+    if os.path.isabs(filepath):
+        return filepath
+    normalized = filepath.replace("\\", "/").lstrip("./")
+    if normalized == "artifacts" or normalized.startswith("artifacts/"):
+        suffix = normalized[len("artifacts") :].lstrip("/")
+        return os.path.join(ARTIFACTS_DIR, suffix) if suffix else ARTIFACTS_DIR
+    return os.path.join(WORKING_DIR, filepath)
+
 
 def _ensure_cli_scripts_on_path() -> None:
     """Prepend pip user script dir so CLIs (e.g. browser-use) resolve in subprocess."""
@@ -96,15 +182,19 @@ def _ensure_cli_scripts_on_path() -> None:
 
 
 def _artifact_files_mtime_snapshot() -> dict:
-    """Relative path from WORKING_DIR -> mtime. Only scans under artifacts/."""
+    """Relative path from WORKING_DIR -> mtime. Scans active user's ARTIFACTS_DIR."""
     snap = {}
     if not os.path.isdir(ARTIFACTS_DIR):
         return snap
-    for dirpath, _, filenames in os.walk(ARTIFACTS_DIR):
+    for dirpath, dirnames, filenames in os.walk(ARTIFACTS_DIR):
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_SNAPSHOT_DIRS]
         for fn in filenames:
             full = os.path.join(dirpath, fn)
             try:
-                rel = os.path.relpath(full, WORKING_DIR)
+                try:
+                    rel = os.path.relpath(full, WORKING_DIR)
+                except ValueError:
+                    rel = full
                 snap[rel] = os.path.getmtime(full)
             except OSError:
                 pass
@@ -188,7 +278,8 @@ _exec_globals = {
     "re": _re,
     "requests": _requests,
     "WORKING_DIR": WORKING_DIR,
-    "ARTIFACTS_DIR": ARTIFACTS_DIR,
+    "ARTIFACTS_DIR": ARTIFACTS_DIR,  # updated by set_user_workspace()
+    "USER_SKILLS_DIR": USER_SKILLS_DIR,  # updated by set_user_workspace()
 }
 
 _KOREAN_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
@@ -216,11 +307,12 @@ def execute_code(code: str) -> str:
     json, csv, os, requests, etc.
 
     Variables and imports from previous calls persist across invocations.
-    Generated files should be saved to the 'artifacts/' directory.
+    Generated files should be saved under ARTIFACTS_DIR (per-user workspace).
 
     Path variables (pre-defined, do NOT redefine):
     - WORKING_DIR: absolute path to application directory
-    - ARTIFACTS_DIR: absolute path to artifacts directory (WORKING_DIR/artifacts)
+    - ARTIFACTS_DIR: absolute path to this user's artifacts ({SESSION_STORAGE_DIR}/{user_id}/artifacts)
+    - USER_SKILLS_DIR: absolute path to this user's skills workspace
 
     Args:
         code: Python code to execute.
@@ -231,6 +323,8 @@ def execute_code(code: str) -> str:
     """
     logger.info(f"###### execute_code ######")
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    _exec_globals["ARTIFACTS_DIR"] = ARTIFACTS_DIR
+    _exec_globals["USER_SKILLS_DIR"] = USER_SKILLS_DIR
     before_files = _artifact_files_mtime_snapshot()
 
     old_cwd = os.getcwd()
@@ -306,6 +400,7 @@ def write_file(filepath: str, content: str = "") -> str:
 
     Args:
         filepath: Absolute path or path relative to WORKING_DIR.
+            Relative paths under artifacts/ map to the active user's ARTIFACTS_DIR.
         content: The text content to write. REQUIRED - must not be omitted. Must include full file content.
 
     Returns:
@@ -318,7 +413,7 @@ def write_file(filepath: str, content: str = "") -> str:
         )
     logger.info(f"###### write_file: {filepath} ######")
     try:
-        full_path = filepath if os.path.isabs(filepath) else os.path.join(WORKING_DIR, filepath)
+        full_path = _resolve_workdir_path(filepath)
         parent = os.path.dirname(full_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -337,13 +432,14 @@ def read_file(filepath: str) -> str:
 
     Args:
         filepath: Absolute path or path relative to WORKING_DIR.
+            Relative paths under artifacts/ map to the active user's ARTIFACTS_DIR.
 
     Returns:
         The file contents as text, or an error message.
     """
     logger.info(f"###### read_file: {filepath} ######")
     try:
-        full_path = filepath if os.path.isabs(filepath) else os.path.join(WORKING_DIR, filepath)
+        full_path = _resolve_workdir_path(filepath)
         with open(full_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
@@ -355,7 +451,8 @@ def upload_file_to_s3(filepath: str) -> str:
     """Upload a local file to S3 and return the download URL.
 
     Args:
-        filepath: Path relative to the working directory (e.g. 'artifacts/report.pdf').
+        filepath: Absolute path or path relative to WORKING_DIR
+            (e.g. 'artifacts/report.pdf' → active user's ARTIFACTS_DIR).
 
     Returns:
         The download URL, or an error message.
@@ -365,20 +462,21 @@ def upload_file_to_s3(filepath: str) -> str:
         if not s3_bucket:
             return "S3 bucket is not configured."
 
-        full_path = os.path.join(WORKING_DIR, filepath)
+        full_path = _resolve_workdir_path(filepath)
         if not os.path.exists(full_path):
             return f"File not found: {filepath}"
 
-        content_type = utils.get_contents_type(filepath)
+        s3_key = os.path.relpath(full_path, WORKING_DIR).replace("\\", "/")
+        content_type = utils.get_contents_type(s3_key)
         s3 = boto3.client("s3", region_name=config.get("region", "us-west-2"))
 
         with open(full_path, "rb") as f:
-            s3.put_object(Bucket=s3_bucket, Key=filepath, Body=f.read(), ContentType=content_type)
+            s3.put_object(Bucket=s3_bucket, Key=s3_key, Body=f.read(), ContentType=content_type)
 
         if sharing_url:
-            url = f"{sharing_url}/{url_parse.quote(filepath)}"
+            url = f"{sharing_url}/{url_parse.quote(s3_key)}"
             return f"Upload complete: {url}"
-        return f"Upload complete: {s3_uri_to_console_url(f"s3://{s3_bucket}/{filepath}", config.get("region", "us-west-2"))}"
+        return f"Upload complete: {s3_uri_to_console_url(f"s3://{s3_bucket}/{s3_key}", config.get("region", "us-west-2"))}"
 
     except Exception as e:
         return f"Upload failed: {str(e)}"
@@ -1140,6 +1238,9 @@ async def run_langgraph_agent(
     if session_user_id and chat.user_id != session_user_id:
         chat.user_id = session_user_id
         logger.info("Synced chat.user_id for RAG/MCP: %s", session_user_id)
+    if session_user_id:
+        set_user_workspace(session_user_id)
+        skill.set_user_workspace(session_user_id)
 
     queue = notification_queue if notification_queue else None
     if queue:
@@ -1308,9 +1409,8 @@ async def run_langgraph_agent(
 
                 if tool_name == "write_file" and toolResult.startswith("File saved:"):
                     saved = toolResult.split("File saved:", 1)[1].strip()
-                    if not os.path.isabs(saved):
-                        saved = os.path.join(WORKING_DIR, saved)
-                    if os.path.isfile(saved) and os.path.abspath(saved).startswith(os.path.abspath(ARTIFACTS_DIR)):
+                    saved = _resolve_workdir_path(saved)
+                    if os.path.isfile(saved) and _path_is_under(os.path.abspath(saved), os.path.abspath(ARTIFACTS_DIR)):
                         artifact_paths.append(saved)
                         logger.info(f"artifact_paths from write_file: {saved}")
 

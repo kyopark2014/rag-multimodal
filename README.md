@@ -81,7 +81,7 @@ flowchart TB
   end
 
   subgraph Storage["Storage"]
-    ART[artifacts/]
+    ART[.session_storage/{user_id}/artifacts/]
     S3[(S3: docs/, metadata/)]
     OSDB[(Managed OpenSearch)]
   end
@@ -463,7 +463,8 @@ rag-multimodal/
 │   ├── info.py
 │   ├── config.json               # installer가 갱신 (버킷·OpenSearch URL 등)
 │   ├── contents/                 # 샘플 PDF (`global_ship_status.pdf` 등)
-│   ├── artifacts/                # pdf2img·img2text 중간 산출물 (page PNG·MD)
+│   ├── .session_storage/         # 사용자별 세션 워크스페이스
+│   │   └── {user_id}/artifacts/  # pdf2img·img2text 중간 산출물 (page PNG·MD)
 │   └── skills/
 │       ├── pdf2img/              # PDF 페이지 → PNG (`scripts/pdf2img.py`)
 │       └── img2text/             # 이미지 → Markdown (`scripts/batch_img2text.py`)
@@ -591,7 +592,7 @@ cd application/web && npm run dev   # http://localhost:5173  (/api → :8501 프
 
 1. UI 사이드바/업로드에서 PDF 선택 (예: [`application/contents/global_ship_status.pdf`](./application/contents/global_ship_status.pdf))
 2. 업로드가 완료되면 S3 저장 → 페이지 OCR → OpenSearch 적재가 진행됩니다 (페이지 수·모델에 따라 **수 분** 소요 가능)
-3. 중간 산출물은 `application/artifacts/{문서이름}/`에 PNG·MD로 남을 수 있습니다
+3. 중간 산출물은 `application/.session_storage/{user_id}/artifacts/{문서이름}/`에 PNG·MD로 남을 수 있습니다
 
 ### 2. 질의 응답 (Agent)
 

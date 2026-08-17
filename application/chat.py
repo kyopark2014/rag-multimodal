@@ -116,6 +116,13 @@ def update(
             logger.info(f"user_id: {user_id}")
         elif normalized:
             user_id = normalized
+        if normalized:
+            # Isolate artifacts + user skills under {SESSION_STORAGE_DIR}/{user_id}/
+            import langgraph_agent
+            import skill
+
+            langgraph_agent.set_user_workspace(normalized)
+            skill.set_user_workspace(normalized)
 
     if modelName is not None and model_name != modelName:
         model_name = modelName

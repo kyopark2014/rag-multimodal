@@ -59,6 +59,7 @@ flowchart TD
 | 마지막 | `config.json` 업데이트 | 앱이 참조하는 URL·ARN·비밀번호 등 |
 
 코드에 `create_secrets()`(Weather/Tavily API 키) 호출은 **주석 처리**되어 있어, 기본 설치에서는 Secrets Manager를 만들지 않습니다.
+앱 런타임은 agent-skills/agent-manus와 동일한 **공유** 시크릿 이름 `tavilyapikey`(및 `openweathermap`)를 조회합니다.
 
 ## 1. S3 버킷 (`create_s3_bucket`)
 

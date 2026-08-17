@@ -350,7 +350,8 @@ secretsmanager = boto3.client(
     region_name=bedrock_region
 )
 
-# Tavily Search API key: prefer config.json, else Secrets Manager
+# Tavily Search API key: prefer config.json, else shared Secrets Manager secret
+# (same name as agent-skills / agent-manus: "tavilyapikey")
 tavily_api_wrapper = ""
 tavily_key = (config.get("tavily_api_key") or "").strip()
 if tavily_key:
@@ -359,7 +360,7 @@ if tavily_key:
 else:
     try:
         get_tavily_api_secret = secretsmanager.get_secret_value(
-            SecretId=f"tavilyapikey-{projectName}"
+            SecretId="tavilyapikey"
         )
         secret = json.loads(get_tavily_api_secret["SecretString"])
 

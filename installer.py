@@ -931,20 +931,54 @@ def _normalize_iam_arn_for_backend_role(arn: str) -> str:
     `arn:aws:sts::ACCOUNT:assumed-role/RoleName/SessionName` when called
     from an assumed role; OpenSearch backend_role matching expects the
     underlying IAM role ARN (`arn:aws:iam::ACCOUNT:role/RoleName`).
+
+    For IAM Identity Center (SSO) roles the real ARN includes a path
+    (`.../role/aws-reserved/sso.amazonaws.com/<region>/AWSReservedSSO_...`).
+    When possible we resolve that via ``iam.get_role`` so Dashboards SigV4
+    principals match the FGAC mapping.
     """
     match = re.match(
         r"^arn:aws:sts::(?P<account>\d+):assumed-role/(?P<role>[^/]+)/.*$", arn
     )
     if match:
-        return (
-            f"arn:aws:iam::{match.group('account')}:role/{match.group('role')}"
-        )
+        role_name = match.group("role")
+        short_arn = f"arn:aws:iam::{match.group('account')}:role/{role_name}"
+        try:
+            return iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
+        except ClientError:
+            return short_arn
+    if arn.startswith("arn:aws:iam::") and ":role/" in arn:
+        # Already an IAM role ARN — prefer the path-qualified form from IAM.
+        role_name = arn.rsplit("/", 1)[-1]
+        try:
+            return iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
+        except ClientError:
+            return arn
     return arn
 
 
+def _caller_backend_role_arns() -> list[str]:
+    """IAM ARNs to map onto OpenSearch ``all_access`` for the current caller.
+
+    Returns both the path-qualified role ARN (SSO) and the short
+    ``role/RoleName`` form so either principal string OpenSearch presents
+    will match.
+    """
+    identity_arn = sts_client.get_caller_identity()["Arn"]
+    primary = _normalize_iam_arn_for_backend_role(identity_arn)
+    arns = {primary, identity_arn}
+    # Short form without path (legacy / STS-normalized)
+    if ":role/" in primary:
+        role_name = primary.rsplit("/", 1)[-1]
+        account = primary.split(":")[4]
+        arns.add(f"arn:aws:iam::{account}:role/{role_name}")
+    return sorted(a for a in arns if a)
+
+
 def _get_caller_backend_role_arn() -> str:
-    """Backend role ARN for the IAM identity currently running the installer."""
-    return _normalize_iam_arn_for_backend_role(
+    """Primary backend role ARN for the IAM identity running the installer."""
+    arns = _caller_backend_role_arns()
+    return arns[0] if arns else _normalize_iam_arn_for_backend_role(
         sts_client.get_caller_identity()["Arn"]
     )
 
@@ -1177,8 +1211,9 @@ def create_secrets() -> Dict[str, str]:
     logger.info("Please enter API keys when prompted (press Enter to skip and leave empty):")
     
     secrets = {
+        # Shared across projects (agent-skills / agent-manus / rag-multimodal)
         "weather": {
-            "name": f"openweathermap-{project_name}",
+            "name": "openweathermap",
             "description": "secret for weather api key",
             "secret_value": {
                 "project_name": project_name,
@@ -1186,7 +1221,7 @@ def create_secrets() -> Dict[str, str]:
             }
         },
         "tavily": {
-            "name": f"tavilyapikey-{project_name}",
+            "name": "tavilyapikey",
             "description": "secret for tavily api key",
             "secret_value": {
                 "project_name": project_name,
@@ -1983,7 +2018,7 @@ def main():
             ensure_opensearch_backend_role_mappings(
                 opensearch_info["endpoint"],
                 opensearch_master_password,
-                [_get_caller_backend_role_arn()],
+                _caller_backend_role_arns(),
             )
 
         nori_ready = ensure_analysis_nori_plugin(

@@ -697,25 +697,50 @@ def delete_s3_buckets():
     logger.info("✓ S3 buckets deleted")
 
 
-def delete_secrets():
-    """Delete optional Secrets Manager secrets (if created)."""
+# Shared across projects — do not delete on uninstall by default
+SHARED_API_SECRETS = [
+    "openweathermap",
+    "tavilyapikey",
+]
+
+
+def delete_secrets(delete_shared: bool = False):
+    """Delete Secrets Manager secrets.
+
+    Shared API secrets (tavily/weather) are only deleted when delete_shared is True.
+    Legacy project-scoped secrets (openweathermap-{project}, tavilyapikey-{project})
+    are always removed if present.
+    """
     logger.info("Deleting secrets (if present)")
 
-    secret_names = [
+    legacy_secret_names = [
         f"openweathermap-{project_name}",
         f"tavilyapikey-{project_name}",
     ]
-
-    for secret_name in secret_names:
+    for secret_name in legacy_secret_names:
         try:
             secrets_client.delete_secret(
                 SecretId=secret_name,
                 ForceDeleteWithoutRecovery=True,
             )
-            logger.info(f"  ✓ Deleted secret: {secret_name}")
+            logger.info(f"  ✓ Deleted legacy secret: {secret_name}")
         except ClientError as e:
             if e.response["Error"]["Code"] != "ResourceNotFoundException":
                 logger.warning(f"  Could not delete secret {secret_name}: {e}")
+
+    if delete_shared:
+        for secret_name in SHARED_API_SECRETS:
+            try:
+                secrets_client.delete_secret(
+                    SecretId=secret_name,
+                    ForceDeleteWithoutRecovery=True,
+                )
+                logger.info(f"  ✓ Deleted shared secret: {secret_name}")
+            except ClientError as e:
+                if e.response["Error"]["Code"] != "ResourceNotFoundException":
+                    logger.warning(f"  Could not delete secret {secret_name}: {e}")
+    else:
+        logger.info("  Skipping shared API secrets (openweathermap, tavilyapikey)")
 
     logger.info("✓ Secrets processed")
 
@@ -767,6 +792,11 @@ def main():
             "Delete AgentCore gateway-websearch without a separate confirmation prompt "
             "(default: ask, default answer no)"
         ),
+    )
+    parser.add_argument(
+        "--delete-shared",
+        action="store_true",
+        help="Also delete shared API secrets (openweathermap, tavilyapikey)",
     )
     args = parser.parse_args()
 
@@ -826,7 +856,7 @@ def main():
         else:
             logger.info("Skipping S3 bucket deletion (not requested)")
 
-        delete_secrets()
+        delete_secrets(delete_shared=args.delete_shared)
 
         if delete_cloudfront:
             wait_for_cloudfront_disabled()
