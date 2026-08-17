@@ -627,9 +627,42 @@ cd application/web && npm run dev   # http://localhost:5173  (/api → :8501 프
 
 ## 실행 결과
 
+
 "opensearch로 보일러 에러 코드에 대해 조사하세요."라고 입력후 결과를 보면 아래와 같이 retrieve tool을 이용하여 관련된 문서를 조회하고 결과를 얻을 수 있습니다.
 
 <img width="918" height="661" alt="image" src="https://github.com/user-attachments/assets/7de00ecd-2da2-47c9-b556-9ca35ca23a82" />
+
+아래는 업로드한 파일에서 그림에 대한 foundation model parser의 결과를 보여집니다. 
+
+<img width="478" height="384" alt="image" src="https://github.com/user-attachments/assets/dd5b040f-dafb-43dd-a083-ee6d3daef758" />
+
+이때 추출된 markdown 파일은 아래와 같습니다.
+
+```text
+### 📊 도표 2: 미국의 보호무역 정책 도입 이후 무역적자 폭 오히려 확대
+
+**[이중 축 꺾은선 그래프 — 2000~2025년경]**
+
+- **Y축(좌)**: 미국 무역수지 (억 달러)
+- **Y축(우)**: 경상수지 / GDP 비율 (%)
+- **파란선(좌축)**: 미국 무역수지
+- **초록선(우축)**: 경상수지 / GDP 비율
+
+**주요 관찰 내용:**
+
+- **트럼프 1기(분홍색 음영 구간)**: 보호무역 정책(고율 관세) 도입에도 불구하고 무역적자가 오히려 확대되는 흐름
+- **바이든 행정부(노란색 음영 구간)**: 트럼프 1기 관세를 유지했음에도 무역적자는 지속 확대되어 **약 -120~-140억 달러** 수준까지 악화
+- 경상수지/GDP 비율도 동 기간 **-5~-6%대**까지 하락
+- 이는 고율 관세가 무역적자 축소라는 본래 정책 목표를 달성하지 못했음을 시각적으로 명확히 보여줌
+```
+
+이 내용과 관련하여 "미국의 보호무역 정책의 결과를 트럼프와 바이든을 비교하여 설명하세요." 라고 질문합니다.
+
+<img width="920" alt="image" src="https://github.com/user-attachments/assets/92c75b25-bfde-4c24-a411-f7b50e40935b" />
+
+<img width="920" alt="image" src="https://github.com/user-attachments/assets/5b81e9e6-970b-4ffa-891b-d88baadc4e75" />
+
+
 
 ## 관련 문서
 
