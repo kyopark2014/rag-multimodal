@@ -40,7 +40,7 @@ flowchart TB
     UP["/api/rag/upload PDF"]
     FU["/api/files/upload 첨부"]
     SKUI[Skill / MCP 선택]
-    CHAT["/api/tasks/{id}/chat SSE"]
+    CHAT["/api/tasks/:id/chat SSE"]
   end
 
   subgraph Indexing["문서 인덱싱"]
@@ -66,14 +66,14 @@ flowchart TB
   subgraph LG["LangGraph Agent (langgraph_agent.py)"]
     RLA[run_langgraph_agent]
     CA[create_agent]
-    SG["StateGraph: agent ↔ ToolNode"]
+    SG["StateGraph: agent - ToolNode"]
     BT["Built-in: execute_code, read/write_file, bash, upload_file_to_s3, get_current_time"]
     MC[MultiServerMCPClient]
-    WIKI["add_to_wiki → ~/Documents/wiki"]
+    WIKI["add_to_wiki to Documents/wiki"]
   end
 
   subgraph MCPServers["MCP Servers (mcp_config.py)"]
-    OS["rag-opensearch → retrieve"]
+    OS["rag-opensearch retrieve"]
     TE[text_extraction]
     AWS[aws_documentation]
     WF[web_fetch]
@@ -87,7 +87,7 @@ flowchart TB
   end
 
   subgraph Storage["Storage"]
-    ART[".session_storage/{user_id}/artifacts/"]
+    ART[".session_storage/user_id/artifacts/"]
     TDB[(tasks.db)]
     S3[(S3: docs/, images/, markdown/, metadata/)]
     OSDB[(Managed OpenSearch)]
@@ -109,7 +109,7 @@ flowchart TB
   AOS --> EMB
   AOS --> OSDB
   AOS --> S3
-  FU -->|images/{user_id}/| S3
+  FU -->|images/user_id/| S3
 
   CHAT --> RLA
   SKUI -->|skill_list| BSP
