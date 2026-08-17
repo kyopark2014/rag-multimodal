@@ -296,6 +296,56 @@ for i, doc in enumerate(parent_docs):
 
 검색 시 [`application/mcp_rag_opensearch.py`](./application/mcp_rag_opensearch.py)는 `metadata.doc_level: child`로 벡터 검색한 뒤, `parent_doc_id`로 parent 본문을 `os_client.get`으로 읽어 reference에 사용합니다. 하이브리드 검색이 켜져 있으면 lexical 검색 결과를 함께 합칩니다.
 
+
+### Hybrid Search
+
+하이브리드 검색은 **k-NN(vector)** 와 **lexical(BM25)** 결과를 합칩니다. lexical 쪽은 Managed OpenSearch의 선택 플러그인 **analysis-nori**(`opensearch-analysis-nori`)로 한국어 형태소 분석을 합니다.
+
+- Nori는 도메인에 기본 설치되지 않으며, AWS 관리 패키지(`ZIP-PLUGIN`)를 **Associate**해야 합니다. 연결/해제 시 blue/green 배포가 발생할 수 있습니다. ([Packages](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/custom-packages.html), [Supported plugins](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/supported-plugins.html) — OpenSearch 1.3+)
+- [`installer.py`](./installer.py)의 `ensure_analysis_nori_plugin()`이 엔진 버전에 맞는 `analysis-nori` 패키지를 찾아 도메인에 연결하고, `_analyze`로 `nori` 사용 가능 여부를 확인합니다. 실패 시 standard analyzer로 인덱스를 만듭니다.
+- 검색은 [`mcp_rag_opensearch.py`](./application/mcp_rag_opensearch.py)의 `lexical_search`가 `text`에 `match` 쿼리를 날리며, 인덱싱과 동일 analyzer로 질의도 토큰화됩니다.
+
+#### 구성 요소
+
+| 구성 | 역할 |
+|------|------|
+| `nori` (built-in analyzer) | tokenizer + 기본 POS 필터 + lowercase |
+| `nori_tokenizer` | 형태소 단위 토큰화 (mecab-ko-dic) |
+| `nori_part_of_speech` | 지정 품사(`stoptags`) 제거 |
+| `nori_readingform` | 한자 → 한글 |
+| `nori_number` | 한글 숫자 → 아라비아 숫자 (예: 이천이십삼 → 2023) |
+| `lowercase` | 대소문자 정규화 |
+
+`standard` analyzer는 공백/유니코드 분절만 하고 한글 형태소 분석을 하지 않습니다. Nori는 `사용`, `노리`처럼 의미 단위로 분해해 lexical 검색 품질을 높입니다.
+
+#### `nori_tokenizer` 옵션
+
+| 옵션 | 값 | 의미 |
+|------|-----|------|
+| `decompound_mode` | `none` / `discard`(기본) / `mixed` | 복합명사 처리. `mixed`는 원형+분해 토큰을 모두 저장 |
+| `discard_punctuation` | `true`(기본) / `false` | 구두점 제거 |
+| `user_dictionary_rules` | 문자열 배열 | 인라인 사용자 사전 (신조어 등) |
+| `user_dictionary` | `analyzers/{PackageID}` | S3→Package로 올린 사전 |
+
+예: `강남구청역` + `mixed` → `강남구청역`, `강남`, `구청`, `역` 모두 인덱싱.
+
+#### rag-multimodal과의 대응
+
+[`installer.py`](./installer.py)의 `_rag_index_body(use_nori=True)`가 AWS 커스텀 분석기 패턴과 대응합니다.
+
+| AWS / Nori | 이 프로젝트 |
+|------------|-------------|
+| `analysis-nori` Associate | `ensure_analysis_nori_plugin()` |
+| 커스텀 analyzer | `my_analyzer` (`text` 필드의 `analyzer` / `search_analyzer`) |
+| char filter | `html_strip` |
+| tokenizer | `nori` → `nori_tokenizer` (`decompound_mode: mixed`, `discard_punctuation: true`) |
+| token filters | `nori_number` → `lowercase` → `trim` → `my_nori_part_of_speech` |
+| POS stop | `nori_part_of_speech` + `stoptags` (조사·어미·문장부호 등) |
+| lexical 검색 | `lexical_search()`의 `match` on `text` |
+| Nori 불가 시 | `use_nori=False` → `text`에 standard analyzer |
+
+자세한 활용 예는 [AWS 기술 블로그 – Nori 플러그인](https://aws.amazon.com/ko/blogs/tech/amazon-opensearch-service-korean-nori-plugin-for-analysis/)을 참고하세요.
+
 ### 동기화
 
 React UI(`/api/rag/upload`)에서 파일을 업로드하면 아래와 같이 Amazon S3에 파일을 업로드하고, [multimodal.py](./application/multimodal.py)의 sync_data_source를 이용해 RAG로 활용됩니다.
@@ -431,6 +481,9 @@ rag-multimodal/
 | [`application/mcp_rag_opensearch.py`](./application/mcp_rag_opensearch.py) | k-NN + lexical 하이브리드 검색, parent/child reference |
 | [`lambda-s3-event-manager/lambda_function.py`](./lambda-s3-event-manager/lambda_function.py) | `ObjectRemoved` 이벤트 → `metadata.json`의 `ids`로 벡터 삭제 |
 
+
+
+
 ## 빠른 시작
 
 처음 사용할 때는 아래 순서를 따르면 됩니다. 인프라 세부 설정은 [installer.md](./installer.md)를 참고하세요.
@@ -444,119 +497,9 @@ rag-multimodal/
 
 > OpenSearch 도메인 생성이 끝나기 전에는 인덱싱·검색이 실패할 수 있습니다. installer 로그에서 `[n/m]` 단계 완료와 `application/config.json` 갱신을 확인하세요.
 
-### Message Trim
-
-LangGraph 에이전트([application/langgraph_agent.py](./application/langgraph_agent.py)의 `call_model`)는 LLM 호출 직전에 **HumanMessage 기준 최근 N턴**만 남깁니다. LangGraph state의 `messages`는 checkpointer에 그대로 두고, **모델에 넘기는 메시지만** trim합니다. `history_mode=Enable`/`Disable` 모두 동일하게 적용됩니다.
-
-**기본값:** `MAX_CONTEXT_TURNS = 5` (일반 채팅의 `SimpleMemory(k=5)`와 동일한 “최근 5턴” 의도)
-
-**설정 변경:**
-
-- [application/langgraph_agent.py](./application/langgraph_agent.py)의 `MAX_CONTEXT_TURNS` 상수 수정
-- 또는 `create_agent()`에서 생성하는 config의 `max_turns` / `configurable.max_turns` 지정
-- `max_turns=0`이면 trim 비활성화
-
-상수와 trim 함수는 `langgraph_agent.py`에 정의합니다.
-
-```python
-# application/langgraph_agent.py
-MAX_CONTEXT_TURNS = 5
 
 
-def trim_messages_by_human_turns(messages: list, max_turns: int) -> list:
-    """Keep messages from the last N HumanMessage turns (inclusive)."""
-    if max_turns <= 0 or not messages:
-        return messages
 
-    human_indices = [i for i, msg in enumerate(messages) if isinstance(msg, HumanMessage)]
-    if len(human_indices) <= max_turns:
-        return messages
-
-    return messages[human_indices[-max_turns]:]
-```
-
-`call_model`에서는 `ToolMessage` content 정규화 후 trim을 적용합니다.
-
-```python
-# application/langgraph_agent.py — call_model() 내부
-        max_turns = (
-            config.get("configurable", {}).get("max_turns")
-            or config.get("max_turns")
-            or MAX_CONTEXT_TURNS
-        )
-        trimmed = trim_messages_by_human_turns(messages, max_turns)
-        if len(trimmed) < len(messages):
-            logger.info(
-                f"trimmed messages from {len(messages)} to {len(trimmed)} "
-                f"(max_turns={max_turns})"
-            )
-            messages = trimmed
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system),
-            MessagesPlaceholder(variable_name="messages"),
-        ])
-        chain = prompt | model
-        async for chunk in chain.astream({"messages": messages}):
-            ...
-```
-
-에이전트 config는 `create_agent()`에서 생성하며, `history_mode`와 관계없이 `max_turns`를 전달합니다.
-
-```python
-# application/langgraph_agent.py — create_agent()
-    if history_mode == "Enable":
-        app = buildChatAgentWithHistory(tools)
-        config = {
-            "recursion_limit": 500,
-            "configurable": {"thread_id": chat.user_id},
-            "tools": tools,
-            "system_prompt": system_prompt,
-            "max_turns": MAX_CONTEXT_TURNS,
-        }
-    else:
-        app = buildChatAgent(tools)
-        config = {
-            "recursion_limit": 500,
-            "configurable": {"thread_id": chat.user_id},
-            "tools": tools,
-            "system_prompt": system_prompt,
-            "max_turns": MAX_CONTEXT_TURNS,
-        }
-```
-
-**`max_turns=5`의 의미**
-
-- **사용자 HumanMessage 5개**와, 각 턴에 이어진 **모든 후속 메시지**를 유지
-- 1턴 = `HumanMessage` 1개 + 그 뒤의 `AIMessage`, `ToolMessage`, 도구 feedback loop 전체
-- 도구를 여러 번 호출해도 **같은 사용자 질문이면 1턴**으로 카운트
-
-**예 (도구 사용 포함)**
-
-```
-Human(Q1) → AI(tool_calls) → ToolMessage → AI(A1)
-Human(Q2) → AI(A2)
-Human(Q3) → AI(tool_calls) → ToolMessage → AI(A3)
-```
-
-`max_turns=2`이면 **Q2부터** 유지:
-
-```
-Human(Q2) → AI(A2) → Human(Q3) → AI(tool_calls) → ToolMessage → AI(A3)
-```
-
-**메시지 개수 trim과의 차이**
-
-| 방식 | `N=5`일 때 |
-|------|------------|
-| 이전 (메시지 개수) | 메시지 객체 5개만 유지 → 도구 루프 때문에 사용자 턴 수가 불규칙 |
-| 현재 (HumanMessage 턴) | 사용자 질문 5개 + 각 턴의 AI/Tool 응답 전체 유지 |
-
-**Checkpointer와의 관계**
-
-- `history_mode=Enable`일 때 `MemorySaver` checkpointer에는 **전체 대화 이력**이 저장됩니다.
-- trim은 LLM 컨텍스트 윈도우 관리용이며, 저장된 history를 삭제하지 않습니다.
-- CloudWatch(`/ecs/...`) 또는 애플리케이션 로그에서 `trimmed messages from X to Y (max_turns=5)`로 trim 여부를 확인할 수 있습니다.
 
 ## 설치
 
