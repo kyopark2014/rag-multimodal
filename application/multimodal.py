@@ -92,9 +92,9 @@ def _extract_text_from_image(image_path: str) -> str:
     return tex._parse_result(raw_text).strip()
 
 
-def _ensure_fitz():
+def _ensure_pymupdf():
     try:
-        import fitz
+        import pymupdf
     except ImportError:
         logger.info("PyMuPDF is not installed. Installing now …")
         import subprocess
@@ -103,8 +103,8 @@ def _ensure_fitz():
             [sys.executable, "-m", "pip", "install", "pymupdf"],
             stdout=subprocess.DEVNULL,
         )
-        import fitz
-    return fitz
+        import pymupdf
+    return pymupdf
 
 
 def _s3_key_from_url(file_url: str) -> Optional[str]:
@@ -535,7 +535,7 @@ def pdf_to_images(
     Returns:
         List of absolute paths to the saved image files.
     """
-    fitz = _ensure_fitz()
+    pymupdf = _ensure_pymupdf()
     if dpi is None:
         dpi = 150
 
@@ -548,11 +548,11 @@ def pdf_to_images(
         output_dir = os.path.join(artifacts_dir, stem)
         os.makedirs(output_dir, exist_ok=True)
 
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         total = len(doc)
         saved = []
         zoom = dpi / 72
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pymupdf.Matrix(zoom, zoom)
 
         for i, page in enumerate(doc, start=1):
             pix = page.get_pixmap(matrix=mat, alpha=False)
