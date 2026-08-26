@@ -6,6 +6,7 @@ import base64
 import logging
 import os
 import sys
+import time
 import traceback
 from io import BytesIO
 from typing import Optional
@@ -130,8 +131,15 @@ def _prepare_image_base64(
 
 
 def _extract_text_with_llm(img_base64: str, prompt: Optional[str] = None) -> str:
-    """Extract text from image using LLM."""
-    query = prompt or "텍스트를 추출해서 markdown 포맷으로 변환하세요. 원문의 언어를 그대로 유지하고 번역하지 마세요. <result> tag를 붙여주세요."
+    """Extract text from image using LLM.
+
+    Retries up to 3 times on API errors or when the model returns too little text.
+    """
+    query = prompt or (
+        "텍스트를 추출해서 markdown 포맷으로 변환하세요. "
+        "원문의 언어를 그대로 유지하고 번역하지 마세요. "
+        "<result> tag를 붙여주세요."
+    )
 
     multimodal = _get_chat()
     messages = [
@@ -146,18 +154,44 @@ def _extract_text_with_llm(img_base64: str, prompt: Optional[str] = None) -> str
         )
     ]
 
+    max_attempts = 3
     extracted_text = ""
-    for attempt in range(5):
-        logger.info(f"LLM attempt: {attempt}")
+    for attempt in range(1, max_attempts + 1):
+        logger.info(f"LLM attempt: {attempt}/{max_attempts}")
         try:
             result = multimodal.invoke(messages)
-            extracted_text = result.content
-            break
+            raw = result.content
+            extracted_text = _content_to_text(raw)
+            logger.info(
+                "LLM content type=%s raw_len=%s text_len=%s",
+                type(raw).__name__,
+                len(raw) if hasattr(raw, "__len__") else "n/a",
+                len(extracted_text),
+            )
+            if len(extracted_text) >= 10:
+                break
+            logger.warning(
+                "LLM returned too little text (len=%s) on attempt %s/%s",
+                len(extracted_text),
+                attempt,
+                max_attempts,
+            )
         except Exception:
             err_msg = traceback.format_exc()
-            logger.warning(f"LLM error: {err_msg}")
+            logger.warning(
+                "LLM error on attempt %s/%s: %s", attempt, max_attempts, err_msg
+            )
+            extracted_text = ""
+        if attempt < max_attempts:
+            time.sleep(1)
 
     if len(extracted_text) < 10:
+        logger.warning(
+            "LLM returned too little text after %s attempts (len=%s); "
+            "marking as extraction failure",
+            max_attempts,
+            len(extracted_text),
+        )
         extracted_text = "텍스트를 추출하지 못하였습니다."
 
     return extracted_text
