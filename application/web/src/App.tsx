@@ -7,6 +7,7 @@ import {
   applyTaskTitleFromPrompt,
   buildFallbackTaskDefaults,
   buildNewTaskDefaults,
+  mostRecentlyUpdatedTask,
   sortTasks,
 } from "./services/taskService";
 import {
@@ -155,8 +156,9 @@ export default function App() {
         setActiveTaskId(task.id);
         setMessages([]);
       } else {
-        setActiveTaskId(rows[0].id);
-        await loadMessages(rows[0].id);
+        const latest = mostRecentlyUpdatedTask(rows)!;
+        setActiveTaskId(latest.id);
+        await loadMessages(latest.id);
       }
       if (!cancelled) {
         tasksBootstrappedForUserRef.current = userId;
@@ -405,8 +407,9 @@ export default function App() {
       const rows = await refreshTasks();
       if (activeTaskId !== taskId) return;
       if (rows.length > 0) {
-        setActiveTaskId(rows[0].id);
-        await loadMessages(rows[0].id);
+        const latest = mostRecentlyUpdatedTask(rows)!;
+        setActiveTaskId(latest.id);
+        await loadMessages(latest.id);
         return;
       }
       if (!config) return;
