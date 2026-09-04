@@ -24,7 +24,7 @@ from botocore.exceptions import ClientError
 from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, AIMessageChunk
-from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain.mcp import MCPAdapter
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
