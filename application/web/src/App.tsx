@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { uiError, uiLog } from "./debug";
 import { formatBrandTitle } from "./formatBrandTitle";
 import { useChatStream } from "./hooks/useChatStream";
@@ -24,6 +24,12 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatThread } from "./components/ChatThread";
 import { ChatInput } from "./components/ChatInput";
 import { GoogleLoginModal } from "./components/GoogleLoginModal";
+import {
+  SIDEBAR_W_DEFAULT,
+  clampSidebarWidth,
+  getSidebarWidth,
+  setSidebarWidth as persistSidebarWidth,
+} from "./sidebarSettings";
 
 type DrawerKind = "skill" | "mcp" | "model" | "appearance" | null;
 
@@ -52,6 +58,10 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [drawer, setDrawer] = useState<DrawerKind>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => getSidebarWidth());
+  const [sidebarResizing, setSidebarResizing] = useState(false);
+  const sidebarWidthRef = useRef(sidebarWidth);
+  sidebarWidthRef.current = sidebarWidth;
   const [queuedByTaskId, setQueuedByTaskId] = useState<
     Record<string, QueuedMessage[]>
   >({});
@@ -198,6 +208,38 @@ export default function App() {
     }
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const onSidebarResizeStart = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = sidebarWidthRef.current;
+    setSidebarResizing(true);
+    document.body.classList.add("is-resizing-sidebar");
+
+    const onMove = (ev: PointerEvent) => {
+      const next = clampSidebarWidth(startW + (ev.clientX - startX));
+      sidebarWidthRef.current = next;
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      document.body.classList.remove("is-resizing-sidebar");
+      setSidebarResizing(false);
+      persistSidebarWidth(sidebarWidthRef.current);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }, []);
+
+  const onSidebarResizeReset = useCallback(() => {
+    setSidebarWidth(SIDEBAR_W_DEFAULT);
+    persistSidebarWidth(SIDEBAR_W_DEFAULT);
   }, []);
 
   const handleGoogleCredential = useCallback(
@@ -561,7 +603,10 @@ export default function App() {
   }
 
   return (
-    <div className={`app-shell${sidebarOpen ? " sidebar-open" : ""}`}>
+    <div
+      className={`app-shell${sidebarOpen ? " sidebar-open" : ""}${sidebarResizing ? " is-resizing-sidebar" : ""}`}
+      style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
+    >
       {sidebarOpen && (
         <button
           type="button"
@@ -586,6 +631,9 @@ export default function App() {
         onDeleteTask={handleDeleteTask}
         onLogout={handleLogout}
         onRefreshConfig={refreshConfig}
+        sidebarResizing={sidebarResizing}
+        onSidebarResizeStart={onSidebarResizeStart}
+        onSidebarResizeReset={onSidebarResizeReset}
       />
       <div className="main-panel">
         <ChatThread
