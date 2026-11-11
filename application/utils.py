@@ -92,6 +92,113 @@ def get_user_skills_list_path(user_id: str | None) -> str:
     return os.path.join(SESSION_STORAGE_DIR, segment, "skills.list")
 
 
+def get_user_settings_path(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/settings.json (does not create)."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "settings.json")
+
+
+_USER_TASK_FLAG_KEYS = (
+    "guardrail_enabled",
+    "memory_enabled",
+    "llm_gateway_enabled",
+)
+
+
+def load_user_settings(user_id: str | None) -> dict[str, object]:
+    """Load per-user shared task settings (model / Guardrail / Memory / LLM Gateway).
+
+    Keys are omitted until the user has saved them so callers can fall back to
+    their own defaults.
+    """
+    settings: dict[str, object] = {}
+    path = get_user_settings_path(user_id)
+    if not os.path.isfile(path):
+        return settings
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            for flag in _USER_TASK_FLAG_KEYS:
+                if flag in raw:
+                    settings[flag] = bool(raw[flag])
+            if "model_name" in raw and isinstance(raw.get("model_name"), str):
+                name = raw["model_name"].strip()
+                if name:
+                    settings["model_name"] = name
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Failed to load user settings %s: %s", path, e)
+    return settings
+
+
+def save_user_settings(user_id: str | None, **updates: object) -> dict[str, object]:
+    """Merge updates into per-user settings.json and return the full settings."""
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        raise ValueError(
+            "Invalid user_id for settings path; expected a plain user id, "
+            "not a signed session cookie"
+        )
+    user_dir = os.path.join(SESSION_STORAGE_DIR, segment)
+    os.makedirs(user_dir, exist_ok=True)
+    settings = load_user_settings(user_id)
+    for key, value in updates.items():
+        if key in _USER_TASK_FLAG_KEYS:
+            settings[key] = bool(value)
+        elif key == "model_name":
+            name = str(value or "").strip()
+            if name:
+                settings[key] = name
+    path = get_user_settings_path(user_id)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    logger.info("user settings saved: %s -> %s", path, settings)
+    return settings
+
+
+def get_user_task_feature_flags(user_id: str | None) -> dict[str, bool]:
+    """Per-user Guardrail / Memory / LLM Gateway defaults (all-tasks scope)."""
+    settings = load_user_settings(user_id)
+    return {
+        "guardrail_enabled": bool(settings.get("guardrail_enabled", False)),
+        "memory_enabled": bool(settings.get("memory_enabled", False)),
+        "llm_gateway_enabled": bool(settings.get("llm_gateway_enabled", False)),
+    }
+
+
+def get_user_preferred_model(user_id: str | None) -> str | None:
+    """Per-user model preference shared across all tasks, if saved."""
+    settings = load_user_settings(user_id)
+    raw = settings.get("model_name")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def save_user_task_feature_flags(
+    user_id: str | None,
+    *,
+    guardrail_enabled: bool | None = None,
+    memory_enabled: bool | None = None,
+    llm_gateway_enabled: bool | None = None,
+    model_name: str | None = None,
+) -> dict[str, object]:
+    """Persist shared task settings so new tasks inherit them."""
+    updates: dict[str, object] = {}
+    if guardrail_enabled is not None:
+        updates["guardrail_enabled"] = guardrail_enabled
+    if memory_enabled is not None:
+        updates["memory_enabled"] = memory_enabled
+    if llm_gateway_enabled is not None:
+        updates["llm_gateway_enabled"] = llm_gateway_enabled
+    if model_name is not None and str(model_name).strip():
+        updates["model_name"] = str(model_name).strip()
+    if not updates:
+        return load_user_settings(user_id)
+    return save_user_settings(user_id, **updates)
+
+
 def _list_skill_dir_names(skills_dir: str) -> list[str]:
     if not os.path.isdir(skills_dir):
         return []

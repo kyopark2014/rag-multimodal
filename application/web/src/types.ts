@@ -47,6 +47,10 @@ export interface AppConfig {
   default_gateway_model?: string;
   default_skills: string[];
   default_mcp_servers: string[];
+  /** Per-user Settings defaults (shared across all tasks). */
+  default_guardrail_enabled?: boolean;
+  default_memory_enabled?: boolean;
+  default_llm_gateway_enabled?: boolean;
   llm_gateway_configured?: boolean;
   /** Session-scoped: docs/{project}/{user_id}/ when logged in */
   s3_docs_prefix?: string;

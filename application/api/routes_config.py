@@ -168,12 +168,19 @@ def get_config(request: Request):
         default_skills = ["skill-creator"]
     config = utils.load_config()
     gateway_url, gateway_key = _llm_gateway_from_config()
+    gateway_configured = bool(gateway_url and gateway_key)
     gateway_models = _gateway_ui_models()
     default_gateway_model = (
         DEFAULT_GATEWAY_MODEL
         if DEFAULT_GATEWAY_MODEL in gateway_models
         else (gateway_models[0] if gateway_models else DEFAULT_MODEL)
     )
+    # Per-user Settings (model / Guardrail / Memory / LLM Gateway) shared by all tasks.
+    flags = utils.get_user_task_feature_flags(session_user)
+    preferred_model = utils.get_user_preferred_model(session_user)
+    default_model = preferred_model or DEFAULT_MODEL
+    if default_model not in MODELS and default_model not in gateway_models:
+        default_model = DEFAULT_MODEL
     return {
         "projectName": config.get("projectName", "rag-multimodal"),
         "google_client_id": "",
@@ -183,11 +190,16 @@ def get_config(request: Request):
         "mcp_servers": mcp_options,
         "models": MODELS,
         "gateway_models": gateway_models,
-        "default_model": DEFAULT_MODEL,
+        "default_model": default_model,
         "default_gateway_model": default_gateway_model,
         "default_skills": default_skills,
         "default_mcp_servers": default_mcp,
-        "llm_gateway_configured": bool(gateway_url and gateway_key),
+        "default_guardrail_enabled": flags["guardrail_enabled"],
+        "default_memory_enabled": flags["memory_enabled"],
+        "default_llm_gateway_enabled": (
+            flags["llm_gateway_enabled"] and gateway_configured
+        ),
+        "llm_gateway_configured": gateway_configured,
         # Project base: docs/{projectName}/ ; with session: docs/{projectName}/{user_id}/
         "s3_docs_prefix": (
             utils.user_docs_s3_prefix(session_user) + "/"

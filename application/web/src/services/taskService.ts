@@ -25,26 +25,22 @@ export function titleFromPrompt(prompt: string): string {
 
 export function buildNewTaskDefaults(
   config: AppConfig,
-  activeTask: Task | null,
+  _activeTask: Task | null = null,
 ): CreateTaskDefaults {
+  // Model / Guardrail / Memory / LLM Gateway / Skill / MCP all come from
+  // per-user settings.json via /api/config — not from the active task.
   return {
-    model_name: activeTask?.model_name ?? config.default_model,
-    skills: activeTask?.skills ?? config.default_skills,
-    mcp_servers: activeTask?.mcp_servers ?? config.default_mcp_servers,
-    guardrail_enabled: activeTask?.guardrail_enabled ?? false,
-    memory_enabled: activeTask?.memory_enabled ?? false,
-    llm_gateway_enabled: activeTask?.llm_gateway_enabled ?? false,
+    model_name: config.default_model,
+    skills: config.default_skills ?? [],
+    mcp_servers: config.default_mcp_servers ?? [],
+    guardrail_enabled: config.default_guardrail_enabled ?? false,
+    memory_enabled: config.default_memory_enabled ?? false,
+    llm_gateway_enabled: config.default_llm_gateway_enabled ?? false,
   };
 }
 
 export function buildFallbackTaskDefaults(config: AppConfig): CreateTaskDefaults {
-  return {
-    model_name: config.default_model,
-    skills: config.default_skills,
-    mcp_servers: config.default_mcp_servers,
-    memory_enabled: false,
-    llm_gateway_enabled: false,
-  };
+  return buildNewTaskDefaults(config);
 }
 
 export function applyTaskTitleFromPrompt(
