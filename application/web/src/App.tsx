@@ -738,6 +738,8 @@ export default function App() {
             <ChatInput
               disabled={!activeTask}
               waiting={activeStream.streaming}
+              streamEvents={activeStream.streamEvents}
+              streamText={activeStream.streamText}
               queuedMessages={activeQueuedMessages}
               queuePaused={activeQueuePaused}
               onRemoveQueued={handleRemoveQueued}
